@@ -1,0 +1,4 @@
+-r requirements-runtime.txt
+tqdm
+mediapipe
+tensorflow

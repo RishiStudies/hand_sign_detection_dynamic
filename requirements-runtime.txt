@@ -1,11 +1,8 @@
-opencv-python
 numpy
-streamlit
-textblob
+opencv-python-headless
 joblib
-mediapipe
 scikit-learn
 fastapi
 uvicorn
-tensorflow
+pandas
 python-multipart

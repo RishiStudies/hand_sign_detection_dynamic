@@ -1,4 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.middleware.cors import CORSMiddleware
 import cv2
 import numpy as np
 import joblib
@@ -11,7 +13,16 @@ import warnings
 import time
 from collections import deque
 
+try:
+    from .shared_artifacts import resolve_shared_path, load_shared_state, update_shared_state
+except ImportError:
+    from shared_artifacts import resolve_shared_path, load_shared_state, update_shared_state
+
 warnings.filterwarnings("ignore")
+
+# Maximum frame dimensions to cap for low-end device compatibility
+MAX_FRAME_WIDTH = 320
+MAX_FRAME_HEIGHT = 240
 
 
 try:
@@ -24,13 +35,28 @@ except ImportError:
     TENSORFLOW_AVAILABLE = False
 
 app = FastAPI()
+app.add_middleware(GZipMiddleware, minimum_size=500)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 models_dir = os.path.join(script_dir, "../models")
 
 
-model = joblib.load(os.path.join(models_dir, "hand_alphabet_model.pkl"))
-labels = np.load(os.path.join(models_dir, "class_labels.npy"), allow_pickle=True)
+rf_model_path = resolve_shared_path("random_forest", "model_path")
+rf_labels_path = resolve_shared_path("random_forest", "labels_path")
+model = joblib.load(rf_model_path)
+labels = np.load(rf_labels_path, allow_pickle=True)
 n_features = model.n_features_in_
 
 
@@ -38,12 +64,10 @@ lstm_model = None
 lstm_labels = None
 if TENSORFLOW_AVAILABLE:
     try:
-        lstm_model_path = os.path.join(models_dir, "gesture_model.h5")
+        lstm_model_path = resolve_shared_path("lstm", "model_path")
         if os.path.exists(lstm_model_path):
             lstm_model = load_model(lstm_model_path)
-            lstm_labels = np.load(
-                os.path.join(models_dir, "wlasl_labels.npy"), allow_pickle=True
-            )
+            lstm_labels = np.load(resolve_shared_path("lstm", "labels_path"), allow_pickle=True)
             print("✅ LSTM model loaded successfully")
         else:
             print("⚠️  LSTM model not found")
@@ -138,6 +162,11 @@ combo_detector = ComboDetector()
 
 def extract_features_from_frame(frame: np.ndarray) -> np.ndarray:
     """return feature vector for entire frame or ROI for prediction"""
+    # Downscale large frames to cap CPU/memory usage on low-end devices
+    h, w = frame.shape[:2]
+    if w > MAX_FRAME_WIDTH or h > MAX_FRAME_HEIGHT:
+        scale = min(MAX_FRAME_WIDTH / w, MAX_FRAME_HEIGHT / h)
+        frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     hist = cv2.calcHist([gray], [0], None, [8], [0, 256])
     hist = hist.flatten() / (hist.sum() + 1e-10)
@@ -193,7 +222,7 @@ async def predict_sequence(files: List[UploadFile] = File(...)):
 
     X_sequence = np.array(sequence_features).reshape(1, 30, -1)
 
-    predictions = lstm_model.predict(X_sequence, verbose=0)
+    predictions = lstm_model.predict(X_sequence, batch_size=1, verbose=0)
     predicted_class = np.argmax(predictions[0])
     confidence = float(predictions[0][predicted_class])
 
@@ -240,6 +269,12 @@ def index():
     }
 
 
+@app.get("/artifacts")
+def artifacts():
+    """Return the active shared artifact registry used by the backend."""
+    return load_shared_state()
+
+
 @app.get("/training")
 def training():
     return {
@@ -272,7 +307,7 @@ async def train(samples: List[UploadFile], labels_input: List[str] = Form(...)):
         X, y, test_size=0.2, random_state=42
     )
 
-    clf = RandomForestClassifier(n_estimators=300, random_state=42)
+    clf = RandomForestClassifier(n_estimators=100, random_state=42)
     clf.fit(X_train, y_train)
 
     train_accuracy = clf.score(X_train, y_train)
@@ -282,8 +317,15 @@ async def train(samples: List[UploadFile], labels_input: List[str] = Form(...)):
     labels = np.array(list(label_to_idx.keys()))
     n_features = clf.n_features_in_
 
-    joblib.dump(clf, os.path.join(models_dir, "hand_alphabet_model.pkl"))
-    np.save(os.path.join(models_dir, "class_labels.npy"), labels)
+    model_path = os.path.join(models_dir, "hand_alphabet_model.pkl")
+    labels_path = os.path.join(models_dir, "class_labels.npy")
+    joblib.dump(clf, model_path)
+    np.save(labels_path, labels)
+    update_shared_state(
+        "random_forest",
+        {"model_path": model_path, "labels_path": labels_path, "source": "api_train"},
+        publisher="api_server",
+    )
 
     return {
         "accuracy": float(train_accuracy),
@@ -307,7 +349,7 @@ async def train_csv(file: UploadFile = File(...)):
         X, y, test_size=0.2, random_state=42
     )
 
-    clf = RandomForestClassifier(n_estimators=300, random_state=42)
+    clf = RandomForestClassifier(n_estimators=100, random_state=42)
     clf.fit(X_train, y_train)
 
     accuracy = clf.score(X_test, y_test)
@@ -316,8 +358,15 @@ async def train_csv(file: UploadFile = File(...)):
     labels = clf.classes_
     n_features = clf.n_features_in_
 
-    joblib.dump(clf, os.path.join(models_dir, "hand_alphabet_model.pkl"))
-    np.save(os.path.join(models_dir, "class_labels.npy"), labels)
+    model_path = os.path.join(models_dir, "hand_alphabet_model.pkl")
+    labels_path = os.path.join(models_dir, "class_labels.npy")
+    joblib.dump(clf, model_path)
+    np.save(labels_path, labels)
+    update_shared_state(
+        "random_forest",
+        {"model_path": model_path, "labels_path": labels_path, "source": "api_train_csv"},
+        publisher="api_server",
+    )
 
     return {
         "accuracy": float(accuracy),

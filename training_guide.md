@@ -1,135 +1,131 @@
-# Hand Sign Detection Model Training
+# Hand Sign Detection Local Training Guide
 
-This repository contains a comprehensive training script for hand sign detection models.
+This project now includes a device-local training software path focused on low-end hardware.
 
-## Quick Start
+The local trainer is intentionally separate from the serving backend, but it publishes shared artifacts for the backend to consume.
 
-1. **Activate your virtual environment:**
-   ```bash
-   # On Windows
-   .\venv\Scripts\activate
+Shared backend contract:
+- Active RF model: `models/hand_alphabet_model.pkl`
+- Active RF labels: `models/class_labels.npy`
+- Active sequence data: `data/X_data.npy`, `data/y_data.npy`
+- Active dynamic labels: `models/wlasl_labels.npy`
+- Active registry: `models/shared_backend_state.json`
 
-   # On macOS/Linux
-   source venv/bin/activate
-   ```
+Primary entry point:
 
-2. **Run the training script:**
-   ```bash
-   python model_training_orchestrator.py
-   ```
-
-The script will automatically:
-- Check for available datasets
-- Train appropriate models (Random Forest for CSV data, LSTM for video data)
-- Save trained models to the `models/` directory
-- Generate a training report
-
-## Supported Datasets
-
-### 1. CSV Landmark Data (`data/hand_alphabet_data.csv`)
-- **Model:** Random Forest Classifier
-- **Features:** MediaPipe hand landmarks (x, y, z coordinates)
-- **Labels:** Alphabet letters (A-Z)
-- **Use case:** Static gesture recognition
-
-### 2. WLASL Video Dataset (`data/WLASL_v0.3.json` + `data/videos/`)
-- **Model:** LSTM Neural Network
-- **Features:** Sequential hand landmarks from video frames
-- **Labels:** Sign language glosses
-- **Use case:** Dynamic gesture recognition
-
-### 3. Preprocessed Data (`data/X_data.npy`, `data/y_data.npy`)
-- **Format:** NumPy arrays ready for LSTM training
-- **Generated from:** WLASL video processing
-
-## Training Output
-
-Models are saved to the `models/` directory:
-- `hand_alphabet_model.pkl` - Random Forest model
-- `class_labels.npy` - Random Forest class labels
-- `gesture_model.h5` - LSTM model
-- `wlasl_labels.npy` - LSTM class labels
-
-Training reports are saved to the `reports/` directory.
-
-## Requirements
-
-Install dependencies:
 ```bash
-pip install -r requirements.txt
+python src/training_pipeline.py
 ```
 
-Key dependencies:
-- `tensorflow` - For LSTM training
-- `scikit-learn` - For Random Forest
-- `opencv-python` - For video processing
-- `mediapipe` - For hand landmark detection
-- `pandas`, `numpy` - Data processing
+## 1. Install Profiles
 
-## Advanced Usage
+Use profile-specific dependencies based on where the training runs.
 
-### Train Specific Models
+### Runtime only (inference server)
 
-```python
-from model_training_orchestrator import HandSignModelTrainer
-
-trainer = HandSignModelTrainer()
-
-# Train only Random Forest
-trainer.train_random_forest()
-
-# Process WLASL videos and train LSTM
-X, y = trainer.process_wlasl_videos()
-trainer.train_lstm(X, y)
+```bash
+pip install -r requirements-runtime.txt
 ```
 
-### Custom Parameters
+### Device local training (Pi-friendly)
 
-The script includes sensible defaults but can be modified for:
-- Different sequence lengths
-- Custom model architectures
-- Alternative feature extraction methods
-- Different training hyperparameters
+```bash
+pip install -r requirements-device.txt
+```
 
-## Troubleshooting
+### Full training workstation (includes TensorFlow)
 
-### Common Issues
+```bash
+pip install -r requirements-training.txt
+```
 
-1. **"TensorFlow not available"**
-   - Install TensorFlow: `pip install tensorflow`
-   - LSTM training will be disabled
+## 2. Device-Local Commands
 
-2. **"MediaPipe not available"**
-   - Install MediaPipe: `pip install mediapipe`
-   - Falls back to histogram features
+The local trainer supports command mode and hardware profiles.
 
-3. **No training data found**
-   - Ensure datasets are in the `data/` directory
-   - Check file paths and permissions
+### Preprocess WLASL data for local workflows
 
-4. **Memory errors during LSTM training**
-   - Reduce batch size in the script
-   - Process fewer videos per class
+```bash
+python src/training_pipeline.py --command preprocess --profile pi_zero
+```
 
-### Data Preparation
+### Train Random Forest locally on CSV
 
-If you have custom data:
+```bash
+python src/training_pipeline.py --command train-rf --profile pi_zero
+```
 
-1. **For CSV data:** Format as landmark coordinates with labels in the last column
-2. **For video data:** Organize in WLASL JSON format with video files in `data/videos/`
+### Evaluate active RF model
 
-## Model Performance
+```bash
+python src/training_pipeline.py --command evaluate --profile pi_zero
+```
 
-Typical performance metrics:
-- **Random Forest:** 90-95% accuracy on alphabet recognition
-- **LSTM:** 70-85% accuracy on dynamic gestures (depends on dataset size)
+### Package artifacts and metadata
 
-Performance varies based on:
-- Quality and quantity of training data
-- Hand landmark detection accuracy
-- Model hyperparameters
-- Video quality and lighting conditions
+```bash
+python src/training_pipeline.py --command package --profile pi_zero --note "local retrain"
+```
 
-## Integration
+### Run full device local workflow
 
-Trained models can be used with the FastAPI backend in `src/api_server.py` for real-time gesture recognition.
+```bash
+python src/training_pipeline.py --command device-all --profile pi_zero --note "nightly device run"
+```
+
+## 3. Profile Behavior
+
+### `pi_zero`
+- RF defaults tuned for constrained hardware.
+- WLASL preprocessing uses reduced data limits by default.
+- Designed for reliable on-device retraining and packaging.
+
+### `full`
+- Higher-capacity defaults for workstation-class training.
+- Larger dataset processing limits.
+
+## 4. Useful Overrides
+
+You can override profile defaults when needed:
+
+```bash
+python src/training_pipeline.py --command preprocess --profile pi_zero --max-classes 12 --max-videos-per-class 4 --sequence-length 24 --frame-stride 2
+```
+
+Additional path overrides:
+- `--json-file`
+- `--video-folder`
+- `--csv-path`
+
+## 5. Artifacts and Metadata
+
+Local packaging writes:
+- Packaged copies under `models/packages/`
+- Run metadata JSON under `models/packages/` and `reports/`
+- Shared active registry under `models/shared_backend_state.json`
+
+These metadata files include:
+- Device profile used
+- Last training metrics
+- Preprocessing summary
+- File list included in package
+
+The backend reads active model and dataset paths from the shared registry, so the local trainer can stay a separate tool while still feeding the same backend runtime.
+
+## 6. Notes About LSTM on Device
+
+For Raspberry Pi Zero 2 W, full LSTM training is not recommended for regular operation due to runtime and thermal constraints.
+
+Recommended strategy:
+1. Do RF retraining locally on the device.
+2. Run full LSTM training on a stronger machine.
+3. Deploy optimized artifacts back to the device.
+
+## 7. Backward Compatibility
+
+Legacy mode still works:
+
+```bash
+python src/training_pipeline.py --model all
+python src/training_pipeline.py --model random_forest --low-end
+```

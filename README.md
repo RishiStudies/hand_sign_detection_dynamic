@@ -174,6 +174,19 @@ Optional but useful:
 - `mediapipe` for landmark-based extraction.
 - `uvicorn` for ASGI serving.
 
+Profile-based installs:
+
+```bash
+# Runtime only (inference)
+pip install -r requirements-runtime.txt
+
+# Device-local training (Pi-friendly)
+pip install -r requirements-device.txt
+
+# Full training workstation (includes TensorFlow)
+pip install -r requirements-training.txt
+```
+
 ## Run the Application
 
 ### FastAPI + Frontend (recommended)
@@ -194,7 +207,28 @@ python -m streamlit run src/streamlit_app.py
 
 ## Training Workflows
 
-### Unified training (recommended)
+### Local Device Trainer (new)
+
+The local trainer is a separate CLI, but it publishes active shared artifacts for the backend through canonical files and `models/shared_backend_state.json`.
+
+```bash
+# End-to-end local workflow (preprocess + RF train + eval + package)
+python src/training_pipeline.py --command device-all --profile pi_zero --note "local run"
+
+# Individual commands
+python src/training_pipeline.py --command preprocess --profile pi_zero
+python src/training_pipeline.py --command train-rf --profile pi_zero
+python src/training_pipeline.py --command evaluate --profile pi_zero
+python src/training_pipeline.py --command package --profile pi_zero
+```
+
+You can override preprocessing limits when needed:
+
+```bash
+python src/training_pipeline.py --command preprocess --profile pi_zero --max-classes 12 --max-videos-per-class 4 --sequence-length 24 --frame-stride 2
+```
+
+### Legacy Unified Training
 
 ```bash
 python src/training_pipeline.py --model all

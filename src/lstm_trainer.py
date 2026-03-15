@@ -20,13 +20,13 @@ X_train, X_test, y_train, y_test = train_test_split(
 
 model = Sequential()
 
-model.add(LSTM(64, return_sequences=True, input_shape=(X.shape[1], X.shape[2])))
+model.add(LSTM(32, return_sequences=True, input_shape=(X.shape[1], X.shape[2])))
 model.add(Dropout(0.2))
 
-model.add(LSTM(64))
+model.add(LSTM(32))
 model.add(Dropout(0.2))
 
-model.add(Dense(64, activation="relu"))
+model.add(Dense(32, activation="relu"))
 model.add(Dense(num_classes, activation="softmax"))
 
 model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
@@ -34,7 +34,7 @@ model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accur
 model.summary()
 
 history = model.fit(
-    X_train, y_train, epochs=20, batch_size=16, validation_data=(X_test, y_test)
+    X_train, y_train, epochs=15, batch_size=16, validation_data=(X_test, y_test)
 )
 
 model.save("../models/gesture_model.h5")
