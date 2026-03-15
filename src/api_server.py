@@ -1,6 +1,4 @@
 from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
 import cv2
 import numpy as np
 import joblib
@@ -29,7 +27,6 @@ app = FastAPI()
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 models_dir = os.path.join(script_dir, "../models")
-frontend_dir = os.path.join(script_dir, "../frontend")
 
 
 model = joblib.load(os.path.join(models_dir, "hand_alphabet_model.pkl"))
@@ -236,16 +233,19 @@ def clear_combo_history():
 
 @app.get("/")
 def index():
-    html_path = os.path.join(frontend_dir, "detection_dashboard.html")
-    html = open(html_path).read()
-    return HTMLResponse(html)
+    return {
+        "message": "Frontend moved to Next.js app",
+        "frontend_url": "http://127.0.0.1:3000",
+        "docs": "/docs",
+    }
 
 
 @app.get("/training")
 def training():
-    html_path = os.path.join(frontend_dir, "training_dashboard.html")
-    html = open(html_path).read()
-    return HTMLResponse(html)
+    return {
+        "message": "Use the Next.js frontend for training UI",
+        "frontend_url": "http://127.0.0.1:3000",
+    }
 
 
 @app.post("/train")
@@ -375,4 +375,3 @@ async def train_lstm():
         return {"status": "error", "message": str(e)}
 
 
-app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
