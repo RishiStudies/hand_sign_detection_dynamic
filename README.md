@@ -2,7 +2,7 @@
 
 An end-to-end hand sign recognition platform with:
 
-- Real-time gesture detection through a browser frontend.
+- Real-time gesture detection through a Next.js frontend.
 - FastAPI inference backend.
 - Static gesture modeling (Random Forest).
 - Dynamic sequence modeling (LSTM).
@@ -23,15 +23,14 @@ This repository is structured for both learning and production-style iteration: 
 - Core technical deep dive: `architecture_and_workflows.md`
 - Training-focused guide: `training_guide.md`
 - API + serving logic: `src/api_server.py`
-- Frontend interfaces: `frontend/detection_dashboard.html`, `frontend/training_dashboard.html`
+- Frontend application: `frontend-react/`
 
 ## Repository Structure
 
 ### Application Layer
 
 - `src/api_server.py`: FastAPI app, model loading, inference endpoints, combo logic, and UI routing.
-- `frontend/detection_dashboard.html`: Main prediction UI for real-time gesture detection.
-- `frontend/training_dashboard.html`: Model training UI for CSV/WLASL/custom workflows.
+- `frontend-react/`: Next.js + TypeScript + Tailwind + shadcn UI.
 
 ### Training Layer
 
