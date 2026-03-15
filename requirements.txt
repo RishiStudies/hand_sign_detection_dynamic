@@ -1,0 +1,10 @@
+opencv-python
+numpy
+streamlit
+textblob
+joblib
+mediapipe
+scikit-learn
+fastapi
+uvicorn
+tensorflow
