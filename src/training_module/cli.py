@@ -14,7 +14,7 @@ def training_pipeline_main() -> None:
     )
     parser.add_argument(
         "--command",
-        choices=["legacy", "preprocess", "train-rf", "evaluate", "package", "device-all"],
+        choices=["legacy", "preprocess", "train-rf", "evaluate", "package", "device-all", "export-data"],
         default="legacy",
     )
     _add_profile_args(parser, default_profile="pi_zero")
@@ -30,6 +30,10 @@ def training_pipeline_main() -> None:
     parser.add_argument("--data", choices=["csv", "wlasl"], default=None)
     parser.add_argument("--no-save", action="store_true")
     parser.add_argument("--low-end", action="store_true")
+    parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--archive-prefix", default="training_data_export")
+    parser.add_argument("--exclude-videos", action="store_true")
+    parser.add_argument("--include-hashes", action="store_true")
 
     args = parser.parse_args()
     trainer = TrainingService()
@@ -91,6 +95,16 @@ def training_pipeline_main() -> None:
             max_videos_per_class=max_videos,
             sequence_length=sequence_length,
             frame_stride=frame_stride,
+        )
+        print(json.dumps(result, indent=2))
+        return
+
+    if args.command == "export-data":
+        result = trainer.export_training_data(
+            output_dir=args.output_dir,
+            archive_prefix=args.archive_prefix,
+            include_videos=not args.exclude_videos,
+            include_hashes=args.include_hashes,
         )
         print(json.dumps(result, indent=2))
         return

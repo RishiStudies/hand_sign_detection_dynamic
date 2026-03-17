@@ -87,3 +87,7 @@ data/wlasl_labels*.npy
 data/videos/
 frontend-react/
 frontend-v2/
+# Keep local-only cleanup targets out of Git (no deletion required)
+reports/exports/
+model_training_legacy_backup.py
+model_training.ipynb

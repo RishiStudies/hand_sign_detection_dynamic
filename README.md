@@ -189,6 +189,11 @@ python src/training_pipeline.py --command preprocess --profile pi_zero
 python src/training_pipeline.py --command train-rf   --profile pi_zero
 python src/training_pipeline.py --command evaluate   --profile pi_zero
 python src/training_pipeline.py --command package    --profile pi_zero
+python src/training_pipeline.py --command export-data --profile pi_zero
+
+# Full training-data ZIP export (raw + processed + videos)
+python src/training_pipeline.py --command export-data --profile full \
+  --archive-prefix training_data_full --include-hashes
 
 # Override preprocessing limits
 python src/training_pipeline.py --command preprocess --profile pi_zero \

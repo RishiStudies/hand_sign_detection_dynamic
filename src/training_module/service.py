@@ -1,6 +1,9 @@
 import json
 import os
 import shutil
+import tempfile
+import zipfile
+import hashlib
 from importlib import import_module
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -332,14 +335,16 @@ class TrainingService:
             x_values = np.load(x_path)
             y_values = np.load(y_path)
 
-        num_classes = len(np.unique(y_values))
-        y_cat = to_categorical(y_values, num_classes)
-        min_samples_per_class = min(np.bincount(y_values))
+        _, y_encoded = np.unique(y_values, return_inverse=True)
+        y_encoded = y_encoded.astype(np.int32)
+        num_classes = int(np.max(y_encoded)) + 1
+        y_cat = to_categorical(y_encoded, num_classes)
+        min_samples_per_class = min(np.bincount(y_encoded))
         use_stratify = min_samples_per_class >= 2
 
         if use_stratify:
             x_train, x_test, y_train, y_test = train_test_split(
-                x_values, y_cat, test_size=0.2, random_state=42, stratify=y_values
+                x_values, y_cat, test_size=0.2, random_state=42, stratify=y_encoded
             )
         else:
             x_train, x_test, y_train, y_test = train_test_split(
@@ -466,6 +471,138 @@ class TrainingService:
             json.dump(metadata, file_obj, indent=2)
 
         return metadata_path
+
+    @staticmethod
+    def _sha256_file(file_path: str) -> str:
+        digest = hashlib.sha256()
+        with open(file_path, "rb") as file_obj:
+            for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def export_training_data(
+        self,
+        output_dir: Optional[str] = None,
+        archive_prefix: str = "training_data_export",
+        include_videos: bool = True,
+        include_hashes: bool = False,
+    ) -> Dict[str, object]:
+        if output_dir is None:
+            output_dir = os.path.join(REPORTS_DIR, "exports")
+        os.makedirs(output_dir, exist_ok=True)
+
+        data_root = DATA_DIR
+        if not os.path.isdir(data_root):
+            raise FileNotFoundError(f"Data directory not found: {data_root}")
+
+        if include_videos:
+            videos_dir = os.path.join(data_root, "videos")
+            if not os.path.isdir(videos_dir):
+                raise FileNotFoundError(
+                    f"Video folder not found but include_videos is enabled: {videos_dir}"
+                )
+
+        expected_files = [
+            "WLASL_v0.3.json",
+            "hand_alphabet_data.csv",
+            "X_data.npy",
+            "y_data.npy",
+            "wlasl_labels.npy",
+        ]
+        missing_expected = [
+            expected
+            for expected in expected_files
+            if not os.path.exists(os.path.join(data_root, expected))
+        ]
+
+        selected_files: List[str] = []
+        total_bytes = 0
+        video_bytes = 0
+        for root, _, files in os.walk(data_root):
+            for file_name in files:
+                abs_path = os.path.join(root, file_name)
+                rel_path = os.path.relpath(abs_path, data_root)
+                if not include_videos and rel_path.startswith(f"videos{os.sep}"):
+                    continue
+
+                file_size = os.path.getsize(abs_path)
+                total_bytes += file_size
+                if rel_path.startswith(f"videos{os.sep}"):
+                    video_bytes += file_size
+                selected_files.append(abs_path)
+
+        if not selected_files:
+            raise ValueError("No files selected for export from data directory")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_id = f"{archive_prefix}_{timestamp}"
+        zip_path = os.path.join(output_dir, f"{export_id}.zip")
+        manifest_path = os.path.join(output_dir, f"{export_id}_manifest.json")
+
+        warnings: List[str] = []
+        if include_videos and total_bytes > 0 and (video_bytes / total_bytes) > 0.8:
+            warnings.append("Videos account for more than 80% of total export size")
+        if missing_expected:
+            warnings.append(
+                "Some expected training files are missing: " + ", ".join(missing_expected)
+            )
+
+        with tempfile.TemporaryDirectory(prefix="training_export_") as staging_dir:
+            staged_root = os.path.join(staging_dir, "data")
+            os.makedirs(staged_root, exist_ok=True)
+
+            file_entries: List[Dict[str, object]] = []
+            for src in selected_files:
+                rel_path = os.path.relpath(src, data_root)
+                dst = os.path.join(staged_root, rel_path)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+
+                entry: Dict[str, object] = {
+                    "relative_path": rel_path.replace("\\", "/"),
+                    "size_bytes": int(os.path.getsize(src)),
+                }
+                if include_hashes:
+                    entry["sha256"] = self._sha256_file(src)
+                file_entries.append(entry)
+
+            manifest = {
+                "export_id": export_id,
+                "created_at": datetime.now().isoformat(),
+                "source_data_dir": data_root,
+                "include_videos": include_videos,
+                "include_hashes": include_hashes,
+                "file_count": int(len(file_entries)),
+                "total_bytes": int(total_bytes),
+                "video_bytes": int(video_bytes),
+                "warnings": warnings,
+                "missing_expected_files": missing_expected,
+                "files": file_entries,
+            }
+
+            staged_manifest_path = os.path.join(staged_root, "export_manifest.json")
+            with open(staged_manifest_path, "w", encoding="utf-8") as file_obj:
+                json.dump(manifest, file_obj, indent=2)
+            with open(manifest_path, "w", encoding="utf-8") as file_obj:
+                json.dump(manifest, file_obj, indent=2)
+
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for root, _, files in os.walk(staged_root):
+                    for file_name in files:
+                        file_path = os.path.join(root, file_name)
+                        archive_path = os.path.relpath(file_path, staging_dir).replace("\\", "/")
+                        archive.write(file_path, archive_path)
+
+        return {
+            "archive_path": zip_path,
+            "manifest_path": manifest_path,
+            "file_count": int(len(selected_files)),
+            "total_bytes": int(total_bytes),
+            "video_bytes": int(video_bytes),
+            "include_videos": include_videos,
+            "include_hashes": include_hashes,
+            "warnings": warnings,
+        }
 
     def run_device_pipeline(
         self,

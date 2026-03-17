@@ -72,6 +72,17 @@ python src/training_pipeline.py --command evaluate --profile pi_zero
 python src/training_pipeline.py --command package --profile pi_zero --note "local retrain"
 ```
 
+### Extract all training data to one ZIP
+
+```bash
+python src/training_pipeline.py --command export-data --profile full --archive-prefix training_data_full
+```
+
+Optional flags:
+- `--exclude-videos` to skip `data/videos`.
+- `--include-hashes` to include SHA256 checksums in the manifest.
+- `--output-dir reports/exports` to choose export destination.
+
 ### Run full device local workflow
 
 ```bash
