@@ -1,49 +1,100 @@
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.middleware.cors import CORSMiddleware
-import cv2
-import numpy as np
-import joblib
+import json
+import logging
 import os
+import time
+import importlib
+import uuid
+import warnings
+from collections import defaultdict, deque
+from threading import Lock
+from typing import Any, Dict, List, Optional
+
+import cv2
+import joblib
+import numpy as np
 import pandas as pd
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from typing import List
-import warnings
-import time
-from collections import deque
 
 try:
-    from .shared_artifacts import resolve_shared_path, load_shared_state, update_shared_state
+    from .shared_artifacts import load_shared_state, resolve_shared_path, update_shared_state
+    from .job_queue import enqueue_named_job, get_job_status, is_job_queue_available
+    from .training_module.config import (
+        FEATURE_SCHEMA,
+        FEATURE_SCHEMA_BY_DIMENSION,
+        FEATURE_SCHEMA_VERSION,
+    )
+    from .training_module.features import extract_features_from_frame as extract_shared_features_from_frame
+    from .training_module.features import get_expected_feature_dimension
 except ImportError:
-    from shared_artifacts import resolve_shared_path, load_shared_state, update_shared_state
+    from shared_artifacts import load_shared_state, resolve_shared_path, update_shared_state
+    from job_queue import enqueue_named_job, get_job_status, is_job_queue_available
+    from training_module.config import (
+        FEATURE_SCHEMA,
+        FEATURE_SCHEMA_BY_DIMENSION,
+        FEATURE_SCHEMA_VERSION,
+    )
+    from training_module.features import extract_features_from_frame as extract_shared_features_from_frame
+    from training_module.features import get_expected_feature_dimension
 
 warnings.filterwarnings("ignore")
+logger = logging.getLogger("api_server")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
-# Maximum frame dimensions to cap for low-end device compatibility
+# Performance and safety limits.
 MAX_FRAME_WIDTH = 320
 MAX_FRAME_HEIGHT = 240
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(2 * 1024 * 1024)))
+MAX_SEQUENCE_FRAMES = int(os.getenv("MAX_SEQUENCE_FRAMES", "30"))
+MAX_CSV_UPLOAD_BYTES = int(os.getenv("MAX_CSV_UPLOAD_BYTES", str(10 * 1024 * 1024)))
+RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
+MAX_PREDICT_REQUESTS_PER_WINDOW = int(
+    os.getenv("MAX_PREDICT_REQUESTS_PER_WINDOW", "180")
+)
+MAX_SEQUENCE_REQUESTS_PER_WINDOW = int(
+    os.getenv("MAX_SEQUENCE_REQUESTS_PER_WINDOW", "30")
+)
+MAX_TRAIN_REQUESTS_PER_WINDOW = int(os.getenv("MAX_TRAIN_REQUESTS_PER_WINDOW", "6"))
+MAX_CONCURRENT_SEQUENCE_REQUESTS = int(
+    os.getenv("MAX_CONCURRENT_SEQUENCE_REQUESTS", "2")
+)
+ALLOWED_IMAGE_CONTENT_TYPES = {
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "application/octet-stream",
+}
+TRAINING_API_KEY = os.getenv("TRAINING_API_KEY")
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+REDIS_RATE_LIMIT_PREFIX = os.getenv("REDIS_RATE_LIMIT_PREFIX", "hsd:ratelimit")
+REDIS_COMBO_PREFIX = os.getenv("REDIS_COMBO_PREFIX", "hsd:combo")
+COMBO_STATE_TTL_SECONDS = int(os.getenv("COMBO_STATE_TTL_SECONDS", "300"))
 
-
-try:
-    import tensorflow as tf
-    from tensorflow.keras.models import load_model
-
-    TENSORFLOW_AVAILABLE = True
-except ImportError:
-    print("Warning: TensorFlow not available. LSTM predictions will be disabled.")
-    TENSORFLOW_AVAILABLE = False
+TENSORFLOW_AVAILABLE = importlib.util.find_spec("tensorflow") is not None
+if not TENSORFLOW_AVAILABLE:
+    logger.warning("TensorFlow not available. LSTM predictions are disabled.")
 
 app = FastAPI()
 app.add_middleware(GZipMiddleware, minimum_size=500)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+
+cors_origins_env = os.getenv("CORS_ORIGINS")
+cors_origins = (
+    [origin.strip() for origin in cors_origins_env.split(",") if origin.strip()]
+    if cors_origins_env
+    else [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://localhost:3001",
         "http://127.0.0.1:3001",
-    ],
+    ]
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -51,34 +102,40 @@ app.add_middleware(
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 models_dir = os.path.join(script_dir, "../models")
+data_dir = os.path.join(script_dir, "../data")
+job_inputs_dir = os.path.join(data_dir, "job_inputs")
 
+model = None
+labels = None
+n_features = 8
+rf_feature_schema = FEATURE_SCHEMA
+rf_feature_schema_version = FEATURE_SCHEMA_VERSION
+model_lock = Lock()
+training_lock = Lock()
+rate_limit_lock = Lock()
+rate_limit_store: Dict[str, deque] = defaultdict(deque)
+sequence_inflight_lock = Lock()
+sequence_inflight_count = 0
+redis_client = None
 
-rf_model_path = resolve_shared_path("random_forest", "model_path")
-rf_labels_path = resolve_shared_path("random_forest", "labels_path")
-model = joblib.load(rf_model_path)
-labels = np.load(rf_labels_path, allow_pickle=True)
-n_features = model.n_features_in_
-
-
-lstm_model = None
-lstm_labels = None
-if TENSORFLOW_AVAILABLE:
+if REDIS_URL:
     try:
-        lstm_model_path = resolve_shared_path("lstm", "model_path")
-        if os.path.exists(lstm_model_path):
-            lstm_model = load_model(lstm_model_path)
-            lstm_labels = np.load(resolve_shared_path("lstm", "labels_path"), allow_pickle=True)
-            print("✅ LSTM model loaded successfully")
-        else:
-            print("⚠️  LSTM model not found")
-    except Exception as e:
-        print(f"⚠️  Failed to load LSTM model: {e}")
-        lstm_model = None
+        redis_module = importlib.import_module("redis")
+        redis_client = redis_module.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=1,
+            socket_timeout=1,
+        )
+        redis_client.ping()
+        logger.info("Redis connected for distributed rate limiting")
+    except Exception as exc:
+        redis_client = None
+        logger.warning("Redis unavailable, falling back to in-memory rate limits: %s", exc)
 
 
 class ComboDetector:
     def __init__(self):
-
         self.combos = {
             "HELLO_WORLD": ["HELLO", "WORLD"],
             "THANK_YOU": ["THANK", "YOU"],
@@ -91,12 +148,10 @@ class ComboDetector:
             "ABC": ["A", "B", "C"],
             "COUNTING": ["ONE", "TWO", "THREE"],
         }
-
         self.prediction_buffer = deque(maxlen=10)
         self.buffer_timeout = 5.0
 
     def add_prediction(self, gesture: str, confidence: float, model_type: str = "rf"):
-        """Add a prediction to the buffer"""
         timestamp = time.time()
         self.prediction_buffer.append(
             {
@@ -108,7 +163,6 @@ class ComboDetector:
         )
 
     def check_combos(self, min_confidence: float = 0.7):
-        """Check if any combo pattern is detected in recent predictions"""
         if len(self.prediction_buffer) < 2:
             return None
 
@@ -127,7 +181,6 @@ class ComboDetector:
 
         for combo_name, combo_sequence in self.combos.items():
             if self._matches_combo(gesture_sequence, combo_sequence):
-
                 combo_predictions = recent_predictions[-len(combo_sequence) :]
                 avg_confidence = sum(p["confidence"] for p in combo_predictions) / len(
                     combo_predictions
@@ -145,7 +198,6 @@ class ComboDetector:
     def _matches_combo(
         self, gesture_sequence: List[str], combo_sequence: List[str]
     ) -> bool:
-        """Check if the gesture sequence ends with the combo pattern"""
         if len(gesture_sequence) < len(combo_sequence):
             return False
 
@@ -153,52 +205,427 @@ class ComboDetector:
         return recent_gestures == combo_sequence
 
     def get_available_combos(self):
-        """Return list of available combos"""
         return list(self.combos.keys())
 
 
-combo_detector = ComboDetector()
+combo_detectors: Dict[str, ComboDetector] = {}
+combo_detectors_lock = Lock()
+combo_catalog = ComboDetector()
+
+
+lstm_model = None
+lstm_labels = None
+
+
+def resize_frame_for_inference(frame: np.ndarray) -> np.ndarray:
+    h, w = frame.shape[:2]
+    if w <= MAX_FRAME_WIDTH and h <= MAX_FRAME_HEIGHT:
+        return frame
+
+    scale = min(MAX_FRAME_WIDTH / w, MAX_FRAME_HEIGHT / h)
+    return cv2.resize(
+        frame,
+        (int(w * scale), int(h * scale)),
+        interpolation=cv2.INTER_AREA,
+    )
+
+
+def validate_feature_contract(actual_dimension: int, expected_dimension: int, context: str) -> None:
+    if actual_dimension != expected_dimension:
+        raise ValueError(
+            f"{context} feature mismatch: expected {expected_dimension}, got {actual_dimension}"
+        )
+
+
+def get_rf_feature_contract() -> Dict[str, Any]:
+    state = load_shared_state()
+    rf_state = state.get("random_forest", {}) if isinstance(state, dict) else {}
+    feature_schema = rf_state.get("feature_schema") or FEATURE_SCHEMA
+    feature_schema_version = rf_state.get("feature_schema_version") or FEATURE_SCHEMA_VERSION
+    expected_dimension = rf_state.get("feature_dimension")
+
+    return {
+        "feature_schema": str(feature_schema),
+        "feature_schema_version": str(feature_schema_version),
+        "feature_dimension": int(expected_dimension) if expected_dimension is not None else None,
+    }
+
+
+def load_rf_model() -> bool:
+    global model, labels, n_features, rf_feature_schema, rf_feature_schema_version
+    try:
+        rf_model_path = resolve_shared_path("random_forest", "model_path")
+        rf_labels_path = resolve_shared_path("random_forest", "labels_path")
+        loaded_model = joblib.load(rf_model_path)
+        loaded_labels = np.load(rf_labels_path, allow_pickle=True)
+        feature_contract = get_rf_feature_contract()
+        expected_dimension = feature_contract.get("feature_dimension")
+        if expected_dimension is None:
+            expected_dimension = int(loaded_model.n_features_in_)
+        expected_dimension = int(expected_dimension)
+        inferred_schema = FEATURE_SCHEMA_BY_DIMENSION.get(expected_dimension, feature_contract["feature_schema"])
+        validate_feature_contract(
+            actual_dimension=int(loaded_model.n_features_in_),
+            expected_dimension=expected_dimension,
+            context="RandomForest model",
+        )
+        with model_lock:
+            model = loaded_model
+            labels = loaded_labels
+            n_features = loaded_model.n_features_in_
+            rf_feature_schema = inferred_schema
+            rf_feature_schema_version = str(
+                feature_contract.get("feature_schema_version")
+                or f"{inferred_schema}_v1"
+            )
+        logger.info("RandomForest model loaded successfully")
+        return True
+    except Exception as exc:
+        logger.warning("RandomForest load failed: %s", exc)
+        return False
+
+
+def load_lstm_model() -> bool:
+    global lstm_model, lstm_labels
+    if not TENSORFLOW_AVAILABLE:
+        return False
+
+    try:
+        load_model = importlib.import_module("tensorflow.keras.models").load_model
+        lstm_model_path = resolve_shared_path("lstm", "model_path")
+        if not os.path.exists(lstm_model_path):
+            logger.warning("LSTM model path does not exist: %s", lstm_model_path)
+            return False
+        lstm_model = load_model(lstm_model_path)
+        lstm_labels = np.load(resolve_shared_path("lstm", "labels_path"), allow_pickle=True)
+        logger.info("LSTM model loaded successfully")
+        return True
+    except Exception as exc:
+        logger.warning("LSTM load failed: %s", exc)
+        lstm_model = None
+        lstm_labels = None
+        return False
+
+
+def get_combo_detector(session_id: Optional[str]) -> ComboDetector:
+    session_key = (session_id or "anonymous").strip() or "anonymous"
+    with combo_detectors_lock:
+        if session_key not in combo_detectors:
+            combo_detectors[session_key] = ComboDetector()
+        return combo_detectors[session_key]
+
+
+def get_combo_session_key(session_id: Optional[str]) -> str:
+    return (session_id or "anonymous").strip() or "anonymous"
+
+
+def get_combo_redis_key(session_id: Optional[str]) -> str:
+    session_key = get_combo_session_key(session_id)
+    return f"{REDIS_COMBO_PREFIX}:{session_key}"
+
+
+def load_combo_predictions(session_id: Optional[str]) -> List[Dict[str, Any]]:
+    if redis_client is not None:
+        try:
+            serialized_predictions = redis_client.lrange(get_combo_redis_key(session_id), 0, -1)
+            return [json.loads(item) for item in serialized_predictions]
+        except Exception as exc:
+            logger.warning("Redis combo read failed, using in-memory fallback: %s", exc)
+
+    return list(get_combo_detector(session_id).prediction_buffer)
+
+
+def add_prediction_for_session(
+    session_id: Optional[str],
+    gesture: str,
+    confidence: float,
+    model_type: str,
+) -> None:
+    prediction = {
+        "gesture": gesture,
+        "confidence": confidence,
+        "timestamp": time.time(),
+        "model": model_type,
+    }
+
+    if redis_client is not None:
+        try:
+            redis_key = get_combo_redis_key(session_id)
+            redis_client.rpush(redis_key, json.dumps(prediction))
+            redis_client.ltrim(redis_key, -10, -1)
+            redis_client.expire(redis_key, COMBO_STATE_TTL_SECONDS)
+            return
+        except Exception as exc:
+            logger.warning("Redis combo write failed, using in-memory fallback: %s", exc)
+
+    detector = get_combo_detector(session_id)
+    detector.prediction_buffer.append(prediction)
+
+
+def check_combos_for_session(
+    session_id: Optional[str],
+    min_confidence: float = 0.7,
+):
+    predictions = load_combo_predictions(session_id)
+    if len(predictions) < 2:
+        return None
+
+    detector = ComboDetector()
+    detector.prediction_buffer.extend(predictions)
+    return detector.check_combos(min_confidence=min_confidence)
+
+
+def clear_combo_state(session_id: Optional[str]) -> None:
+    if redis_client is not None:
+        try:
+            redis_client.delete(get_combo_redis_key(session_id))
+            return
+        except Exception as exc:
+            logger.warning("Redis combo delete failed, using in-memory fallback: %s", exc)
+
+    detector = get_combo_detector(session_id)
+    detector.prediction_buffer.clear()
+
+
+def validate_upload(file: UploadFile, data: bytes, field_name: str = "file") -> None:
+    if file.content_type and file.content_type.lower() not in ALLOWED_IMAGE_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported media type for {field_name}: {file.content_type}",
+        )
+    if not data:
+        raise HTTPException(status_code=400, detail=f"{field_name} is empty")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"{field_name} exceeds max size {MAX_UPLOAD_BYTES} bytes",
+        )
+
+
+def persist_sample_training_inputs(
+    samples: List[UploadFile], sample_payloads: List[bytes], labels_input: List[str]
+) -> str:
+    job_dir = os.path.join(job_inputs_dir, f"train-{uuid.uuid4().hex}")
+    os.makedirs(job_dir, exist_ok=True)
+
+    manifest_samples = []
+    for index, (sample, data, label) in enumerate(zip(samples, sample_payloads, labels_input)):
+        file_path = os.path.join(job_dir, f"sample_{index:04d}.jpg")
+        with open(file_path, "wb") as file_obj:
+            file_obj.write(data)
+        manifest_samples.append({"label": label, "file_path": file_path})
+
+    manifest_path = os.path.join(job_dir, "manifest.json")
+    with open(manifest_path, "w", encoding="utf-8") as file_obj:
+        json.dump({"samples": manifest_samples}, file_obj)
+    return manifest_path
+
+
+def persist_csv_training_input(data: bytes) -> str:
+    os.makedirs(job_inputs_dir, exist_ok=True)
+    csv_path = os.path.join(job_inputs_dir, f"train_csv_{uuid.uuid4().hex}.csv")
+    with open(csv_path, "wb") as file_obj:
+        file_obj.write(data)
+    return csv_path
+
+
+def require_training_key(x_api_key: Optional[str]) -> None:
+    if not TRAINING_API_KEY:
+        return
+    if x_api_key != TRAINING_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+def acquire_training_slot() -> None:
+    if not training_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Training already in progress")
+
+
+def get_client_identity(request: Request, session_id: Optional[str] = None) -> str:
+    if session_id:
+        return f"session:{session_id.strip() or 'anonymous'}"
+
+    x_forwarded_for = request.headers.get("x-forwarded-for", "")
+    if x_forwarded_for:
+        return f"ip:{x_forwarded_for.split(',')[0].strip()}"
+    if request.client and request.client.host:
+        return f"ip:{request.client.host}"
+    return "ip:unknown"
+
+
+def enforce_rate_limit(
+    bucket: str,
+    key: str,
+    max_requests: int,
+    window_seconds: int = RATE_LIMIT_WINDOW_SECONDS,
+) -> None:
+    if redis_client is not None:
+        try:
+            enforce_rate_limit_redis(bucket, key, max_requests, window_seconds)
+            return
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning("Redis rate limit failed, using in-memory fallback: %s", exc)
+
+    now = time.time()
+    composite_key = f"{bucket}:{key}"
+
+    with rate_limit_lock:
+        request_times = rate_limit_store[composite_key]
+        while request_times and (now - request_times[0]) > window_seconds:
+            request_times.popleft()
+
+        if len(request_times) >= max_requests:
+            raise HTTPException(
+                status_code=429,
+                detail="Rate limit exceeded",
+                headers={"Retry-After": str(window_seconds)},
+            )
+
+        request_times.append(now)
+
+
+def enforce_rate_limit_redis(
+    bucket: str,
+    key: str,
+    max_requests: int,
+    window_seconds: int,
+) -> None:
+    redis_key = f"{REDIS_RATE_LIMIT_PREFIX}:{bucket}:{key}"
+    count = int(redis_client.incr(redis_key))
+    if count == 1:
+        redis_client.expire(redis_key, window_seconds)
+
+    if count > max_requests:
+        ttl = redis_client.ttl(redis_key)
+        retry_after = str(ttl if isinstance(ttl, int) and ttl > 0 else window_seconds)
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded",
+            headers={"Retry-After": retry_after},
+        )
+
+
+def acquire_sequence_slot() -> None:
+    global sequence_inflight_count
+    with sequence_inflight_lock:
+        if sequence_inflight_count >= MAX_CONCURRENT_SEQUENCE_REQUESTS:
+            raise HTTPException(
+                status_code=503,
+                detail="Sequence inference busy. Retry shortly.",
+                headers={"Retry-After": "2"},
+            )
+        sequence_inflight_count += 1
+
+
+def release_sequence_slot() -> None:
+    global sequence_inflight_count
+    with sequence_inflight_lock:
+        if sequence_inflight_count > 0:
+            sequence_inflight_count -= 1
 
 
 def extract_features_from_frame(frame: np.ndarray) -> np.ndarray:
-    """return feature vector for entire frame or ROI for prediction"""
-    # Downscale large frames to cap CPU/memory usage on low-end devices
-    h, w = frame.shape[:2]
-    if w > MAX_FRAME_WIDTH or h > MAX_FRAME_HEIGHT:
-        scale = min(MAX_FRAME_WIDTH / w, MAX_FRAME_HEIGHT / h)
-        frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    hist = cv2.calcHist([gray], [0], None, [8], [0, 256])
-    hist = hist.flatten() / (hist.sum() + 1e-10)
-    features = list(hist)
-    if len(features) < n_features:
-        features.extend([0.0] * (n_features - len(features)))
-    else:
-        features = features[:n_features]
-    return np.array(features).reshape(1, -1)
+    frame = resize_frame_for_inference(frame)
+    features = extract_shared_features_from_frame(frame).flatten()
+    validate_feature_contract(
+        actual_dimension=int(features.shape[0]),
+        expected_dimension=int(n_features),
+        context="Inference request",
+    )
+    return features.reshape(1, -1)
 
 
 def extract_features_from_bytes(data: bytes) -> np.ndarray:
     npimg = np.frombuffer(data, np.uint8)
     frame = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
-    return extract_features_from_frame(frame)
+    if frame is None:
+        raise HTTPException(status_code=400, detail="Invalid image payload")
+    try:
+        return extract_features_from_frame(frame)
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get("/health/live")
+def health_live():
+    return {"status": "ok"}
+
+
+@app.get("/health/ready")
+def health_ready():
+    if model is None or labels is None:
+        raise HTTPException(status_code=503, detail="RandomForest model unavailable")
+    return {
+        "status": "ready",
+        "random_forest": "available",
+        "lstm": "available" if lstm_model is not None else "unavailable",
+    }
+
+
+@app.get("/health/details")
+def health_details():
+    state = load_shared_state()
+    return {
+        "status": "ready" if model is not None and labels is not None else "degraded",
+        "rate_limit_backend": "redis" if redis_client is not None else "in_memory",
+        "combo_state_backend": "redis" if redis_client is not None else "in_memory",
+        "job_queue_backend": "redis_rq" if is_job_queue_available() else "unavailable",
+        "model_status": {
+            "random_forest": model is not None and labels is not None,
+            "lstm": lstm_model is not None,
+            "tensorflow": TENSORFLOW_AVAILABLE,
+            "rf_feature_schema": rf_feature_schema,
+            "rf_feature_schema_version": rf_feature_schema_version,
+            "rf_feature_dimension": n_features,
+        },
+        "limits": {
+            "max_upload_bytes": MAX_UPLOAD_BYTES,
+            "max_csv_upload_bytes": MAX_CSV_UPLOAD_BYTES,
+            "max_sequence_frames": MAX_SEQUENCE_FRAMES,
+            "max_frame": {
+                "width": MAX_FRAME_WIDTH,
+                "height": MAX_FRAME_HEIGHT,
+            },
+        },
+        "shared_artifacts": state,
+    }
 
 
 @app.post("/predict")
-async def predict(file: UploadFile = File(...)):
-    """Receive an image file and return the predicted label/probability."""
+async def predict(
+    request: Request,
+    file: UploadFile = File(...),
+    x_session_id: Optional[str] = Header(default=None),
+):
+    client_key = get_client_identity(request, session_id=x_session_id)
+    enforce_rate_limit("predict", client_key, MAX_PREDICT_REQUESTS_PER_WINDOW)
+
+    if model is None or labels is None:
+        raise HTTPException(status_code=503, detail="RandomForest model unavailable")
+
     data = await file.read()
+    validate_upload(file, data)
     features = extract_features_from_bytes(data)
-    proba = model.predict_proba(features)[0]
-    idx = int(np.argmax(proba))
-    predicted_label = str(labels[idx])
-    confidence = float(proba[idx])
 
-    combo_detector.add_prediction(predicted_label, confidence, "rf")
+    with model_lock:
+        probabilities = model.predict_proba(features)[0]
+        local_labels = labels
 
-    combo_result = combo_detector.check_combos()
+    idx = int(np.argmax(probabilities))
+    predicted_label = str(local_labels[idx])
+    confidence = float(probabilities[idx])
 
-    response = {"label": predicted_label, "prob": confidence}
+    add_prediction_for_session(x_session_id, predicted_label, confidence, "rf")
+    combo_result = check_combos_for_session(x_session_id)
+
+    response = {
+        "label": predicted_label,
+        "prob": confidence,
+        "backend_mode": "random_forest",
+        "feature_schema_version": rf_feature_schema_version,
+    }
     if combo_result:
         response["combo"] = combo_result
 
@@ -206,221 +633,245 @@ async def predict(file: UploadFile = File(...)):
 
 
 @app.post("/predict_sequence")
-async def predict_sequence(files: List[UploadFile] = File(...)):
-    """Receive a sequence of image files and return LSTM prediction."""
-    if lstm_model is None:
-        return {"error": "LSTM model not available"}
+async def predict_sequence(
+    request: Request,
+    files: List[UploadFile] = File(...),
+    x_session_id: Optional[str] = Header(default=None),
+):
+    client_key = get_client_identity(request, session_id=x_session_id)
+    enforce_rate_limit("predict_sequence", client_key, MAX_SEQUENCE_REQUESTS_PER_WINDOW)
+    acquire_sequence_slot()
 
-    if len(files) != 30:
-        return {"error": f"Expected 30 frames, got {len(files)}"}
+    try:
+        if lstm_model is None:
+            raise HTTPException(status_code=503, detail="LSTM model not available")
 
-    sequence_features = []
-    for file in files:
-        data = await file.read()
-        features = extract_features_from_bytes(data)
-        sequence_features.append(features.flatten())
+        if len(files) != MAX_SEQUENCE_FRAMES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Expected {MAX_SEQUENCE_FRAMES} frames, got {len(files)}",
+            )
 
-    X_sequence = np.array(sequence_features).reshape(1, 30, -1)
+        sequence_features = []
+        for i, file in enumerate(files):
+            data = await file.read()
+            validate_upload(file, data, field_name=f"files[{i}]")
+            features = extract_features_from_bytes(data)
+            sequence_features.append(features.flatten())
 
-    predictions = lstm_model.predict(X_sequence, batch_size=1, verbose=0)
-    predicted_class = np.argmax(predictions[0])
-    confidence = float(predictions[0][predicted_class])
+        x_sequence = np.array(sequence_features).reshape(1, MAX_SEQUENCE_FRAMES, -1)
+        predictions = lstm_model.predict(x_sequence, batch_size=1, verbose=0)
+        predicted_class = int(np.argmax(predictions[0]))
+        confidence = float(predictions[0][predicted_class])
 
-    predicted_label = (
-        str(lstm_labels[predicted_class])
-        if lstm_labels is not None
-        else str(predicted_class)
-    )
+        predicted_label = (
+            str(lstm_labels[predicted_class])
+            if lstm_labels is not None
+            else str(predicted_class)
+        )
 
-    combo_detector.add_prediction(predicted_label, confidence, "lstm")
+        add_prediction_for_session(x_session_id, predicted_label, confidence, "lstm")
+        combo_result = check_combos_for_session(x_session_id)
 
-    combo_result = combo_detector.check_combos()
+        response = {
+            "label": predicted_label,
+            "prob": confidence,
+            "model": "lstm",
+            "backend_mode": "lstm",
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+        }
+        if combo_result:
+            response["combo"] = combo_result
 
-    response = {"label": predicted_label, "prob": confidence, "model": "lstm"}
-
-    if combo_result:
-        response["combo"] = combo_result
-
-    return response
+        return response
+    finally:
+        release_sequence_slot()
 
 
 @app.get("/combos")
-def get_combos():
-    """Get list of available gesture combos"""
+def get_combos(x_session_id: Optional[str] = Header(default=None)):
     return {
-        "combos": combo_detector.get_available_combos(),
-        "patterns": combo_detector.combos,
+        "combos": combo_catalog.get_available_combos(),
+        "patterns": combo_catalog.combos,
     }
 
 
 @app.post("/clear_combos")
-def clear_combo_history():
-    """Clear the combo detection buffer"""
-    combo_detector.prediction_buffer.clear()
+def clear_combo_history(x_session_id: Optional[str] = Header(default=None)):
+    clear_combo_state(x_session_id)
     return {"status": "cleared"}
 
 
 @app.get("/")
 def index():
+    frontend_url = os.getenv("FRONTEND_URL", "http://127.0.0.1:3000")
     return {
         "message": "Frontend moved to Next.js app",
-        "frontend_url": "http://127.0.0.1:3000",
+        "frontend_url": frontend_url,
         "docs": "/docs",
     }
 
 
 @app.get("/artifacts")
 def artifacts():
-    """Return the active shared artifact registry used by the backend."""
     return load_shared_state()
 
 
 @app.get("/training")
 def training():
+    frontend_url = os.getenv("FRONTEND_URL", "http://127.0.0.1:3000")
     return {
         "message": "Use the Next.js frontend for training UI",
-        "frontend_url": "http://127.0.0.1:3000",
+        "frontend_url": frontend_url,
     }
 
 
-@app.post("/train")
-async def train(samples: List[UploadFile], labels_input: List[str] = Form(...)):
-    global model, labels, n_features
+@app.get("/jobs/{job_id}")
+def get_training_job(job_id: str):
+    if not is_job_queue_available():
+        raise HTTPException(status_code=503, detail="Job queue unavailable")
 
-    X = []
-    y = []
-    label_to_idx = {}
+    try:
+        job_state = get_job_status(job_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    result = job_state.get("result")
+    if job_state.get("status") == "finished" and isinstance(result, dict):
+        if result.get("job_name") == "train_lstm":
+            load_lstm_model()
+        if result.get("job_name") in {"train_rf_samples", "train_rf_csv"}:
+            load_rf_model()
+
+    return job_state
+
+
+@app.post("/train", status_code=202)
+async def train(
+    request: Request,
+    samples: List[UploadFile] = File(...),
+    labels_input: List[str] = Form(...),
+    x_api_key: Optional[str] = Header(default=None),
+):
+    require_training_key(x_api_key)
+    enforce_rate_limit(
+        "train", get_client_identity(request), MAX_TRAIN_REQUESTS_PER_WINDOW
+    )
+    if not is_job_queue_available():
+        raise HTTPException(status_code=503, detail="Job queue unavailable")
+    if len(samples) == 0:
+        raise HTTPException(status_code=400, detail="No samples provided")
+    if len(samples) != len(labels_input):
+        raise HTTPException(
+            status_code=400,
+            detail="samples and labels_input size mismatch",
+        )
+
+    sample_payloads = []
     for sample, label in zip(samples, labels_input):
-        if label not in label_to_idx:
-            label_to_idx[label] = len(label_to_idx)
-
+        if not label or len(label.strip()) == 0 or len(label) > 64:
+            raise HTTPException(status_code=400, detail="Invalid label")
         data = await sample.read()
-        features = extract_features_from_bytes(data)
-        X.append(features.flatten())
-        y.append(label_to_idx[label])
+        validate_upload(sample, data, field_name="sample")
+        sample_payloads.append(data)
 
-    X = np.array(X)
-    y = np.array(y)
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
-
-    clf = RandomForestClassifier(n_estimators=100, random_state=42)
-    clf.fit(X_train, y_train)
-
-    train_accuracy = clf.score(X_train, y_train)
-    test_accuracy = clf.score(X_test, y_test)
-
-    model = clf
-    labels = np.array(list(label_to_idx.keys()))
-    n_features = clf.n_features_in_
-
-    model_path = os.path.join(models_dir, "hand_alphabet_model.pkl")
-    labels_path = os.path.join(models_dir, "class_labels.npy")
-    joblib.dump(clf, model_path)
-    np.save(labels_path, labels)
-    update_shared_state(
-        "random_forest",
-        {"model_path": model_path, "labels_path": labels_path, "source": "api_train"},
-        publisher="api_server",
-    )
+    manifest_path = persist_sample_training_inputs(samples, sample_payloads, labels_input)
+    try:
+        job = enqueue_named_job("train_rf_samples", manifest_path=manifest_path)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return {
-        "accuracy": float(train_accuracy),
-        "test_accuracy": float(test_accuracy),
-        "samples": len(X),
-        "gestures": len(label_to_idx),
+        "status": "queued",
+        "job_id": job.id,
+        "job_type": "train_rf_samples",
     }
 
 
-@app.post("/train_csv")
-async def train_csv(file: UploadFile = File(...)):
-    global model, labels, n_features
+@app.post("/train_csv", status_code=202)
+async def train_csv(
+    request: Request,
+    file: UploadFile = File(...),
+    x_api_key: Optional[str] = Header(default=None),
+):
+    require_training_key(x_api_key)
+    enforce_rate_limit(
+        "train", get_client_identity(request), MAX_TRAIN_REQUESTS_PER_WINDOW
+    )
+    if not is_job_queue_available():
+        raise HTTPException(status_code=503, detail="Job queue unavailable")
 
     data = await file.read()
-    df = pd.read_csv(pd.io.common.BytesIO(data))
+    if not data:
+        raise HTTPException(status_code=400, detail="CSV file is empty")
+    if len(data) > MAX_CSV_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"CSV file exceeds max size {MAX_CSV_UPLOAD_BYTES} bytes",
+        )
+    if file.content_type and "csv" not in file.content_type.lower():
+        raise HTTPException(status_code=415, detail="Expected CSV content type")
 
-    X = df.iloc[:, :-1].values
-    y = df.iloc[:, -1].values
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
-
-    clf = RandomForestClassifier(n_estimators=100, random_state=42)
-    clf.fit(X_train, y_train)
-
-    accuracy = clf.score(X_test, y_test)
-
-    model = clf
-    labels = clf.classes_
-    n_features = clf.n_features_in_
-
-    model_path = os.path.join(models_dir, "hand_alphabet_model.pkl")
-    labels_path = os.path.join(models_dir, "class_labels.npy")
-    joblib.dump(clf, model_path)
-    np.save(labels_path, labels)
-    update_shared_state(
-        "random_forest",
-        {"model_path": model_path, "labels_path": labels_path, "source": "api_train_csv"},
-        publisher="api_server",
-    )
+    csv_path = persist_csv_training_input(data)
+    try:
+        job = enqueue_named_job("train_rf_csv", csv_path=csv_path)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return {
-        "accuracy": float(accuracy),
-        "samples": len(X),
-        "gestures": len(np.unique(y)),
+        "status": "queued",
+        "job_id": job.id,
+        "job_type": "train_rf_csv",
     }
 
 
-@app.post("/process_wlasl")
-async def process_wlasl():
-    """Process WLASL dataset videos and extract features"""
-    import subprocess
-    import sys
+@app.post("/process_wlasl", status_code=202)
+async def process_wlasl(
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+):
+    require_training_key(x_api_key)
+    enforce_rate_limit(
+        "train", get_client_identity(request), MAX_TRAIN_REQUESTS_PER_WINDOW
+    )
+    if not is_job_queue_available():
+        raise HTTPException(status_code=503, detail="Job queue unavailable")
 
     try:
+        job = enqueue_named_job("process_wlasl")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-        result = subprocess.run(
-            [sys.executable, os.path.join(script_dir, "wlasl_data_preprocessor.py")],
-            capture_output=True,
-            text=True,
-            cwd=script_dir,
-        )
-
-        if result.returncode == 0:
-            return {
-                "status": "success",
-                "message": "WLASL dataset processed successfully",
-            }
-        else:
-            return {"status": "error", "message": result.stderr}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    return {
+        "status": "queued",
+        "job_id": job.id,
+        "job_type": "process_wlasl",
+    }
 
 
-@app.post("/train_lstm")
-async def train_lstm():
-    """Train LSTM model on processed WLASL data"""
-    import subprocess
-    import sys
+@app.post("/train_lstm", status_code=202)
+async def train_lstm(
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+):
+    require_training_key(x_api_key)
+    enforce_rate_limit(
+        "train", get_client_identity(request), MAX_TRAIN_REQUESTS_PER_WINDOW
+    )
+    if not is_job_queue_available():
+        raise HTTPException(status_code=503, detail="Job queue unavailable")
 
     try:
+        job = enqueue_named_job("train_lstm")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-        result = subprocess.run(
-            [sys.executable, os.path.join(script_dir, "lstm_trainer.py")],
-            capture_output=True,
-            text=True,
-            cwd=script_dir,
-        )
-
-        if result.returncode == 0:
-            return {"status": "success", "message": "LSTM model trained successfully"}
-        else:
-            return {"status": "error", "message": result.stderr}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    return {
+        "status": "queued",
+        "job_id": job.id,
+        "job_type": "train_lstm",
+    }
 
 
+load_rf_model()
+load_lstm_model()

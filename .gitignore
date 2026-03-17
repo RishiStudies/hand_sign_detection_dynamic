@@ -13,6 +13,7 @@ __pycache__/
 venv/
 env/
 ENV/
+.python-version
 
 # Packaging / build
 build/
@@ -24,6 +25,8 @@ dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.hypothesis/
+.cache/
 .coverage
 .coverage.*
 htmlcov/
@@ -42,6 +45,9 @@ htmlcov/
 .env.development.local
 .env.test.local
 .env.production.local
+frontend/.env.local
+frontend/.env
+frontend/.env.*
 
 # Logs
 *.log
@@ -49,6 +55,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+*.pid
 
 # Frontend – Next.js
 node_modules/
@@ -61,6 +68,9 @@ frontend/out/
 
 # Local runtime outputs
 reports/
+*.sqlite3
+tmp/
+temp/
 
 # Model artifacts (generated)
 models/*.pkl

@@ -1,0 +1,72 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    environment:
+      FRONTEND_URL: http://localhost:3000
+      CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      LOG_LEVEL: INFO
+      MAX_UPLOAD_BYTES: 2097152
+      MAX_SEQUENCE_FRAMES: 30
+      MAX_CSV_UPLOAD_BYTES: 10485760
+      REDIS_URL: redis://redis:6379/0
+      REDIS_RATE_LIMIT_PREFIX: hsd:ratelimit
+      REDIS_COMBO_PREFIX: hsd:combo
+      COMBO_STATE_TTL_SECONDS: 300
+      JOB_QUEUE_NAME: training
+      JOB_TIMEOUT_SECONDS: 7200
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models
+      - ./data:/app/data
+      - ./reports:/app/reports
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      JOB_QUEUE_NAME: training
+      JOB_TIMEOUT_SECONDS: 7200
+      REDIS_RATE_LIMIT_PREFIX: hsd:ratelimit
+      REDIS_COMBO_PREFIX: hsd:combo
+      COMBO_STATE_TTL_SECONDS: 300
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./models:/app/models
+      - ./data:/app/data
+      - ./reports:/app/reports
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+

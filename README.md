@@ -1,95 +1,278 @@
-# Hand Sign Detection Dynamic
+﻿# Hand Sign Detection Dynamic
 
-A full-stack hand sign recognition system built for practical experimentation and production-style iteration. It combines browser-based inference, profile-aware local training, and a shared artifact contract that keeps training and serving cleanly decoupled.
+A full-stack hand sign recognition system combining browser-based live inference, profile-aware local training, and a shared feature contract that keeps training and serving cleanly decoupled.
 
-## Why This Project Is Useful
+---
 
-- Real-time sign prediction from webcam frames through a modern Next.js frontend.
-- Dual modeling strategy: Random Forest for low-latency static gestures and LSTM for sequence-aware dynamic signs.
-- Built-in combo detection that recognizes gesture phrases from a rolling prediction stream.
-- Multiple training paths: browser-triggered API training, local device CLI workflow, and root orchestration pipeline.
-- Shared backend state registry so active artifacts are consistently discoverable.
+## Table of Contents
 
-## Core Capabilities
+1. [What It Does](#what-it-does)
+2. [Project Structure](#project-structure)
+3. [Quickstart](#quickstart)
+4. [Feature Schema Contract](#feature-schema-contract)
+5. [Training](#training)
+6. [API Reference](#api-reference)
+7. [Docker](#docker)
+8. [System Diagrams](#system-diagrams)
+9. [Troubleshooting](#troubleshooting)
+10. [Further Reading](#further-reading)
 
-| Capability | What It Does | Primary Files |
-|---|---|---|
-| Live Inference | Captures camera frames and returns label + confidence in near real time | `frontend/app/page.tsx`, `src/api_server.py` |
-| Static Model Path | Trains/serves Random Forest from landmark-style features | `src/random_forest_trainer.py`, `src/api_server.py` |
-| Dynamic Model Path | Trains/serves LSTM from fixed-length feature sequences | `src/wlasl_data_preprocessor.py`, `src/lstm_trainer.py` |
-| Combo Layer | Matches recent predictions to predefined gesture templates | `src/api_server.py` |
-| Device-Local Training | Profile-aware CLI for constrained hardware and packaging | `src/training_pipeline.py` |
-| Shared Artifact Contract | Publishes active model/data paths for backend consumption | `src/shared_artifacts.py`, `models/shared_backend_state.json` |
+---
 
-## 90-Second Quickstart
+## What It Does
 
-### 1. Install Python dependencies
+| Capability | Description |
+|---|---|
+| **Live Inference** | Webcam frames → label + confidence in near real time |
+| **Random Forest (Static)** | Low-latency single-frame predictions from landmark-style features |
+| **LSTM (Dynamic)** | Sequence-aware predictions from rolling 30-frame windows |
+| **Combo Detection** | Recognises gesture phrases from a rolling prediction buffer |
+| **Device Training** | Profile-aware CLI training that runs on Pi Zero or workstation |
+| **API Training** | Browser/API-triggered training queued through Redis + RQ |
+| **Shared Artifact Contract** | One registry file keeps model paths consistent between training and serving |
 
-```bash
-pip install -r requirements-runtime.txt
+---
+
+## Project Structure
+
+```
+hand_sign_detection_dynamic/
+│
+├── src/                            # All backend Python source
+│   ├── api_server.py               # FastAPI app — inference, health, training endpoints
+│   ├── shared_artifacts.py         # Reads/writes models/shared_backend_state.json
+│   ├── job_queue.py                # Redis/RQ job submission helpers
+│   ├── worker.py                   # RQ worker entry point for training jobs
+│   ├── training_pipeline.py        # Device-local CLI trainer (wraps training_module)
+│   ├── wlasl_data_preprocessor.py  # WLASL video → feature sequence preprocessor
+│   │
+│   ├── training_module/            # Canonical training package (used by all entry points)
+│   │   ├── config.py               # Feature schema, device profiles, shared constants
+│   │   ├── features.py             # Shared feature extraction (histogram or mediapipe)
+│   │   ├── service.py              # RF + LSTM training, evaluation, artifact publishing
+│   │   ├── jobs.py                 # RQ job handlers (called by worker.py)
+│   │   ├── cli.py                  # CLI entry used by training_pipeline.py
+│   │   └── __init__.py
+│   │
+│   │   # Legacy wrappers — kept for backward compatibility, thin shells only:
+│   ├── random_forest_trainer.py    # → delegates to training_module
+│   ├── lstm_trainer.py             # → delegates to training_module
+│   └── streamlit_app.py            # Optional Streamlit debug UI
+│
+├── frontend/                       # Next.js 16 + React 19 + TypeScript + Tailwind
+│   └── app/
+│       ├── page.tsx                # Landing page with project overview and Get Started CTA
+│       ├── console/
+│       │   └── page.tsx            # Live detection console (camera + prediction + calibration)
+│       ├── types.ts                # Shared TypeScript types (PredictionResponse, etc.)
+│       ├── layout.tsx
+│       ├── globals.css
+│       ├── hooks/                  # Domain-separated React hooks
+│       │   ├── useCameraCapture.ts # Camera stream, frame capture, calibration images
+│       │   ├── usePredictionLoop.ts# Adaptive prediction loop + backend health ping
+│       │   └── useCalibrationFlow.ts # Calibration session management
+│       └── components/
+│           ├── ControlButton.tsx   # Reusable HUD button
+│           ├── MetricTile.tsx      # Status metric display card
+│           └── GestureTimeline.tsx # Mission-log gesture history
+│
+├── data/                           # Training data (not committed to git)
+│   ├── hand_alphabet_data.csv      # Static gesture CSV (RF training)
+│   ├── WLASL_v0.3.json             # WLASL metadata
+│   ├── videos/                     # WLASL video clips
+│   ├── X_data.npy                  # Preprocessed LSTM feature sequences
+│   ├── y_data.npy                  # Preprocessed LSTM labels
+│   └── wlasl_labels.npy            # Class label array for LSTM
+│
+├── models/                         # Trained artifacts (not committed to git)
+│   ├── shared_backend_state.json   # ← Active artifact registry (training writes, API reads)
+│   ├── gesture_model.h5            # LSTM model
+│   ├── class_labels.npy            # RF class labels
+│   └── wlasl_labels.npy            # LSTM class labels
+│
+├── reports/                        # Evaluation output (confusion matrices, metrics)
+│
+├── .env.example                    # Template for all environment variables
+├── docker-compose.yml              # Backend + frontend + Redis + worker
+├── Dockerfile.backend
+├── Dockerfile.worker
+├── requirements-runtime.txt        # Inference-only dependencies
+├── requirements-training.txt       # Full training dependencies
+├── requirements-device.txt         # Lightweight dependencies for constrained devices
+├── architecture_and_workflows.md   # Deep-dive design notes
+└── training_guide.md               # Local training operations guide
 ```
 
-For full training workflows:
+> **Key insight:** `models/shared_backend_state.json` is the handoff point between training and serving. Training writes the active artifact paths here; the API reads from it on startup and on each model reload.
+
+---
+
+## Quickstart
+
+### 1. Python dependencies
 
 ```bash
+# Inference only
+pip install -r requirements-runtime.txt
+
+# Full training support
 pip install -r requirements-training.txt
 ```
 
-### 2. Start the FastAPI backend
+### 2. Environment
+
+Copy `.env.example` to `.env` and configure at minimum:
+
+```bash
+FEATURE_SCHEMA=histogram          # or: mediapipe
+TRAINING_API_KEY=your-secret-key  # secures /train and related endpoints
+CORS_ORIGINS=http://localhost:3000
+```
+
+### 3. Start the backend
 
 ```bash
 python -m uvicorn src.api_server:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-### 3. Start the Next.js frontend
+### 4. Start the frontend
 
 ```bash
+# Create frontend/.env.local
+echo "NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000" > frontend/.env.local
+
 cd frontend
 npm install
-npm.cmd run dev
+npm.cmd run dev    # use npm.cmd in PowerShell
 ```
 
-If PowerShell blocks npm scripts, use `npm.cmd` instead of `npm`.
+### 5. Open the app
 
-### 4. Open the app
+| URL | Purpose |
+|---|---|
+| `http://127.0.0.1:3000` | Home page with project overview and Get Started flow |
+| `http://127.0.0.1:3000/console` | Live detection console |
+| `http://127.0.0.1:8000/docs` | Interactive API docs (Swagger) |
+| `http://127.0.0.1:8000/health/details` | Backend readiness + loaded artifacts |
 
-- Frontend: `http://127.0.0.1:3000`
-- Backend docs: `http://127.0.0.1:8000/docs`
+Navigation note:
+- Start at `/` to review scope and system context.
+- Click **Get Started** to open `/console`.
 
-## Start Path Guide
+---
 
-```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {
-  'background': '#0b1020',
-  'primaryColor': '#1f2937',
-  'primaryTextColor': '#f9fafb',
-  'primaryBorderColor': '#38bdf8',
-  'lineColor': '#38bdf8',
-  'secondaryColor': '#0f172a',
-  'tertiaryColor': '#111827'
-}}}%%
-flowchart TD
-  A[Open Repository] --> B{Your Goal}
-  B -->|Run Demo| C[Start Backend and Frontend]
-  B -->|Train on Device| D[Use training_pipeline command mode]
-  B -->|Train from UI/API| E[Use /train, /train_csv, /train_lstm]
-  B -->|Understand Design| F[Read architecture_and_workflows.md]
-  C --> G[Live Prediction + Combo Feedback]
-  D --> H[Package Artifacts + Update Shared State]
-  E --> H
-  H --> G
+## Feature Schema Contract
 
-  classDef decision fill:#fef08a,stroke:#eab308,color:#1f2937,stroke-width:2px;
-  classDef action fill:#22d3ee,stroke:#0891b2,color:#082f49,stroke-width:2px;
-  classDef deep fill:#a78bfa,stroke:#7c3aed,color:#1e1b4b,stroke-width:2px;
-  classDef result fill:#34d399,stroke:#059669,color:#052e16,stroke-width:2px;
-  class A,C,D,E,F action;
-  class B decision;
-  class H deep;
-  class G result;
+Training and inference share one explicit feature contract set by `FEATURE_SCHEMA`:
+
+| Value | Feature Type | Dimension | Notes |
+|---|---|---|---|
+| `histogram` | Grayscale histogram | 8 | Default. Fast, no MediaPipe required |
+| `mediapipe` | Hand landmark coords | 63 | Better accuracy, requires MediaPipe |
+
+**Both training and serving must use the same value.** The backend validates model feature dimensions on load and rejects mismatched inputs at inference time instead of silently padding or truncating.
+
+When no hand is detected in `mediapipe` mode, the extractor returns a zero vector of dimension 63 (not a histogram fallback) so the feature contract stays consistent.
+
+---
+
+## Training
+
+### Option A — Device-local CLI
+
+```bash
+# Full end-to-end run
+python src/training_pipeline.py --command device-all --profile pi_zero --note "local run"
+
+# Individual steps
+python src/training_pipeline.py --command preprocess --profile pi_zero
+python src/training_pipeline.py --command train-rf   --profile pi_zero
+python src/training_pipeline.py --command evaluate   --profile pi_zero
+python src/training_pipeline.py --command package    --profile pi_zero
+
+# Override preprocessing limits
+python src/training_pipeline.py --command preprocess --profile pi_zero \
+  --max-classes 12 --max-videos-per-class 4 --sequence-length 24 --frame-stride 2
 ```
 
-## System Architecture
+### Option B — API / browser-triggered (queued via Redis)
+
+Requires `X-API-Key: <TRAINING_API_KEY>` header.
+
+```
+POST /train           Train RF from uploaded image samples
+POST /train_csv       Train RF from uploaded CSV
+POST /process_wlasl   Preprocess WLASL videos
+POST /train_lstm      Train LSTM from preprocessed sequences
+
+GET  /jobs/{job_id}   Check training job status
+```
+
+### Option C — Root orchestrator (legacy)
+
+```bash
+python model_training_orchestrator.py
+```
+
+### Hardware profiles
+
+| Profile | Target hardware | Typical use |
+|---|---|---|
+| `pi_zero` | Raspberry Pi Zero 2 W | On-device preprocessing and RF retraining |
+| `full` | Workstation / laptop | Larger runs, LSTM workflows |
+
+---
+
+## API Reference
+
+| Method | Endpoint | Auth | Purpose |
+|---|---|---|---|
+| `POST` | `/predict` | — | Single-frame RF prediction |
+| `POST` | `/predict_sequence` | — | 30-frame LSTM sequence prediction |
+| `GET` | `/combos` | — | List combo templates |
+| `POST` | `/clear_combos` | — | Reset combo buffer |
+| `GET` | `/artifacts` | — | Active artifact registry |
+| `GET` | `/health/live` | — | Liveness check |
+| `GET` | `/health/ready` | — | Model readiness check |
+| `GET` | `/health/details` | — | Readiness + limits + loaded artifact state |
+| `POST` | `/train` | API key | Train RF from uploaded samples |
+| `POST` | `/train_csv` | API key | Train RF from CSV |
+| `POST` | `/process_wlasl` | API key | WLASL preprocessing |
+| `POST` | `/train_lstm` | API key | LSTM training |
+| `GET` | `/jobs/{job_id}` | — | Training job status |
+
+### Rate limit environment variables
+
+```
+RATE_LIMIT_WINDOW_SECONDS
+MAX_PREDICT_REQUESTS_PER_WINDOW
+MAX_SEQUENCE_REQUESTS_PER_WINDOW
+MAX_TRAIN_REQUESTS_PER_WINDOW
+MAX_CONCURRENT_SEQUENCE_REQUESTS
+```
+
+For multi-instance deployments, set `REDIS_URL` to share rate limits and combo state across replicas.
+
+---
+
+## Docker
+
+```bash
+# Build and start backend + frontend + Redis + worker
+docker compose up --build
+```
+
+| URL | Service |
+|---|---|
+| `http://localhost:3000` | Frontend |
+| `http://localhost:8000` | Backend |
+| `http://localhost:8000/health/ready` | Readiness probe |
+
+---
+
+## System Diagrams
+
+### Architecture overview
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {
@@ -144,7 +327,7 @@ flowchart LR
   class STATE state;
 ```
 
-## Inference Runtime Workflow
+### Inference request flow
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {
@@ -178,7 +361,7 @@ sequenceDiagram
   Frontend-->>User: Render label, confidence, combo status
 ```
 
-## Static vs Dynamic Pipeline
+### Static vs dynamic training pipelines
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {
@@ -218,223 +401,33 @@ flowchart LR
   class S4,D4,D6 artifact;
 ```
 
-## Training Workflow Decision Tree
-
-```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {
-  'background': '#0b1120',
-  'primaryColor': '#111827',
-  'primaryTextColor': '#f9fafb',
-  'primaryBorderColor': '#f472b6',
-  'lineColor': '#22d3ee'
-}}}%%
-flowchart TD
-  A[Need to Retrain] --> B{Where are you training?}
-  B -->|Constrained device| C[Profile: pi_zero]
-  B -->|Workstation| D[Profile: full]
-
-  C --> E[preprocess]
-  C --> F[train-rf]
-  C --> G[evaluate]
-  C --> H[package]
-  C --> I[device-all]
-
-  D --> J[preprocess with higher limits]
-  D --> K[train-rf or legacy all]
-  D --> L[train_lstm path]
-
-  E --> M[shared_backend_state.json updated]
-  F --> M
-  G --> M
-  H --> M
-  I --> M
-  J --> M
-  K --> M
-  L --> M
-
-  classDef decision fill:#fde68a,stroke:#f59e0b,color:#422006,stroke-width:2px;
-  classDef profile fill:#f9a8d4,stroke:#db2777,color:#500724,stroke-width:2px;
-  classDef action fill:#67e8f9,stroke:#0891b2,color:#083344,stroke-width:2px;
-  classDef result fill:#86efac,stroke:#16a34a,color:#052e16,stroke-width:2px;
-  class A,B decision;
-  class C,D profile;
-  class E,F,G,H,I,J,K,L action;
-  class M result;
-```
-
-## Artifact Lifecycle
-
-```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {
-  'background': '#0a1222',
-  'primaryColor': '#111827',
-  'primaryTextColor': '#f8fafc',
-  'primaryBorderColor': '#22d3ee',
-  'lineColor': '#38bdf8'
-}}}%%
-flowchart LR
-  A[Training Command or API Trigger] --> B[Create Model and Label Artifacts]
-  B --> C[Publish Active Paths]
-  C --> D[models/shared_backend_state.json]
-  D --> E[Backend Artifact Resolver]
-  E --> F[Runtime Inference]
-  F --> G[Frontend Prediction UI]
-
-  classDef step fill:#67e8f9,stroke:#0891b2,color:#083344,stroke-width:2px;
-  classDef artifact fill:#fca5a5,stroke:#dc2626,color:#450a0a,stroke-width:2px;
-  classDef final fill:#86efac,stroke:#16a34a,color:#052e16,stroke-width:2px;
-  class A,B,C,E,F step;
-  class D artifact;
-  class G final;
-```
-
-## Run and Train Commands
-
-### Backend + Frontend
-
-```bash
-# Terminal 1
-python -m uvicorn src.api_server:app --host 127.0.0.1 --port 8000 --reload
-
-# Terminal 2
-cd frontend
-npm.cmd run dev
-```
-
-### Device-local trainer commands
-
-```bash
-# End-to-end local flow
-python src/training_pipeline.py --command device-all --profile pi_zero --note "local run"
-
-# Individual steps
-python src/training_pipeline.py --command preprocess --profile pi_zero
-python src/training_pipeline.py --command train-rf --profile pi_zero
-python src/training_pipeline.py --command evaluate --profile pi_zero
-python src/training_pipeline.py --command package --profile pi_zero
-```
-
-### Useful overrides for preprocessing
-
-```bash
-python src/training_pipeline.py --command preprocess --profile pi_zero --max-classes 12 --max-videos-per-class 4 --sequence-length 24 --frame-stride 2
-```
-
-### Legacy mode
-
-```bash
-python src/training_pipeline.py --model all
-python src/training_pipeline.py --model random_forest
-python src/training_pipeline.py --model lstm --data wlasl
-```
-
-### Root orchestrator
-
-```bash
-python model_training_orchestrator.py
-```
-
-## API Endpoint Summary
-
-| Method | Endpoint | Purpose |
-|---|---|---|
-| POST | `/predict` | Single-frame prediction using Random Forest |
-| POST | `/predict_sequence` | Sequence prediction using LSTM (expects 30 frames) |
-| GET | `/combos` | List available combo templates and patterns |
-| POST | `/clear_combos` | Clear combo buffer state |
-| GET | `/` | Backend status with frontend URL hint |
-| GET | `/artifacts` | Return active artifact registry |
-| GET | `/training` | Training UI guidance endpoint |
-| POST | `/train` | Train RF from uploaded image samples + labels |
-| POST | `/train_csv` | Train RF from uploaded CSV |
-| POST | `/process_wlasl` | Trigger WLASL preprocessing script |
-| POST | `/train_lstm` | Trigger LSTM training script |
-
-## Hardware Profiles
-
-| Profile | Intended Hardware | Typical Usage |
-|---|---|---|
-| `pi_zero` | Raspberry Pi Zero 2 W or similar | On-device preprocessing, RF retraining, packaging |
-| `full` | Workstation/laptop with stronger CPU/RAM | Larger preprocessing runs, broader experimentation, LSTM workflows |
-
-## Repository Workflow Map
-
-```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {
-  'background': '#0b1020',
-  'primaryColor': '#111827',
-  'primaryTextColor': '#f8fafc',
-  'primaryBorderColor': '#38bdf8',
-  'lineColor': '#22d3ee',
-  'clusterBkg': '#0f172a',
-  'clusterBorder': '#334155'
-}}}%%
-flowchart TD
-  A[src/] --> A1[api_server.py]
-  A --> A2[training_pipeline.py]
-  A --> A3[wlasl_data_preprocessor.py]
-  A --> A4[lstm_trainer.py]
-  A --> A5[random_forest_trainer.py]
-
-  B[data/] --> B1[CSV and WLASL metadata]
-  B --> B2[videos/]
-  B --> B3[X_data.npy and y_data.npy]
-
-  C[models/] --> C1[RF and LSTM artifacts]
-  C --> C2[class label files]
-  C --> C3[shared_backend_state.json]
-
-  D[frontend/] --> D1[app/]
-  D --> D2[components/]
-  D --> D3[fonts and styling]
-
-  A2 --> C3
-  C3 --> A1
-  D --> A1
-
-  classDef source fill:#60a5fa,stroke:#1d4ed8,color:#172554,stroke-width:2px;
-  classDef data fill:#22d3ee,stroke:#0891b2,color:#083344,stroke-width:2px;
-  classDef model fill:#f59e0b,stroke:#b45309,color:#451a03,stroke-width:2px;
-  classDef front fill:#a78bfa,stroke:#7c3aed,color:#2e1065,stroke-width:2px;
-  class A,A1,A2,A3,A4,A5 source;
-  class B,B1,B2,B3 data;
-  class C,C1,C2,C3 model;
-  class D,D1,D2,D3 front;
-```
+---
 
 ## Troubleshooting
 
-### Frontend does not start in PowerShell
-
-If script policy blocks npm, run via command shell:
-
+**Frontend does not start in PowerShell**
 ```bash
 cmd /c "cd frontend && npm.cmd run dev"
 ```
 
-### Backend starts but file uploads fail
-
-Install multipart support:
-
+**Backend starts but file uploads fail**
 ```bash
 pip install python-multipart
 ```
 
-### MediaPipe is unavailable
+**MediaPipe unavailable**
+Use `FEATURE_SCHEMA=histogram` — no MediaPipe required, works on constrained hardware.
 
-The backend includes a fallback feature extraction path based on grayscale histogram features, so inference can still run in constrained setups.
+**TensorFlow GPU warnings on Windows**
+Expected on native Windows. CPU training and inference continue to work normally.
 
-### TensorFlow warnings on Windows
+---
 
-GPU-related warnings are common on native Windows setups. CPU training and inference continue to work.
+## Further Reading
 
-## Documentation and Deep Dives
-
-- System and workflow deep dive: `architecture_and_workflows.md`
-- Local trainer operations: `training_guide.md`
-- FastAPI implementation: `src/api_server.py`
-- Device trainer CLI implementation: `src/training_pipeline.py`
-
-## Contributing
-
-Contributions are welcome in model quality, data pipeline reliability, combo logic, and frontend usability. If you open a PR, include the command path you validated (`run`, `train-rf`, `device-all`, or API training endpoint) and any artifact changes produced.
+| Document | Contents |
+|---|---|
+| `architecture_and_workflows.md` | System design, component interactions, data flows |
+| `training_guide.md` | Local training operations, device profiles, packaging |
+| `src/api_server.py` | Full FastAPI implementation with inline comments |
+| `src/training_pipeline.py` | Device trainer CLI implementation |

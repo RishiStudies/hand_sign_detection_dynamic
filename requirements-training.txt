@@ -1,4 +1,4 @@
 -r requirements-runtime.txt
-tqdm
-mediapipe
-tensorflow
+tqdm==4.67.1
+mediapipe==0.10.21
+tensorflow==2.15.1

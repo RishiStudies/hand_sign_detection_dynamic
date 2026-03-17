@@ -11,6 +11,11 @@ Shared backend contract:
 - Active dynamic labels: `models/wlasl_labels.npy`
 - Active registry: `models/shared_backend_state.json`
 
+Feature contract:
+- Set `FEATURE_SCHEMA=histogram` for 8-value grayscale histogram features.
+- Set `FEATURE_SCHEMA=mediapipe` for 63-value hand landmark features.
+- Use the same `FEATURE_SCHEMA` value for both training and inference. The backend now validates model/input compatibility explicitly.
+
 Primary entry point:
 
 ```bash
