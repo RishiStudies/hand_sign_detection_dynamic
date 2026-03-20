@@ -5,8 +5,13 @@ import json
 import os
 from tqdm import tqdm
 
-VIDEO_FOLDER = "../data/videos"
-JSON_FILE = "../data/nslt_100.json"
+try:
+    from .shared_artifacts import DATA_DIR, MODELS_DIR, update_shared_state
+except ImportError:
+    from shared_artifacts import DATA_DIR, MODELS_DIR, update_shared_state
+
+VIDEO_FOLDER = os.path.join(DATA_DIR, "videos")
+JSON_FILE = os.path.join(DATA_DIR, "nslt_100.json")
 SEQUENCE_LENGTH = 30
 
 mp_hands = mp.solutions.hands
@@ -53,9 +58,28 @@ for label_index, key in enumerate(tqdm(data)):
 X = np.array(X)
 y = np.array(y)
 
-np.save("../data/X_data.npy", X)
-np.save("../data/y_data.npy", y)
-np.save("../models/class_labels.npy", np.array(labels))
+x_path = os.path.join(DATA_DIR, "X_data.npy")
+y_path = os.path.join(DATA_DIR, "y_data.npy")
+labels_path = os.path.join(MODELS_DIR, "wlasl_labels.npy")
+
+np.save(x_path, X)
+np.save(y_path, y)
+np.save(labels_path, np.array(labels))
+update_shared_state(
+    "dynamic_data",
+    {
+        "x_path": x_path,
+        "y_path": y_path,
+        "labels_path": labels_path,
+        "sequence_length": SEQUENCE_LENGTH,
+    },
+    publisher="wlasl_data_preprocessor",
+)
+update_shared_state(
+    "lstm",
+    {"labels_path": labels_path},
+    publisher="wlasl_data_preprocessor",
+)
 
 print("Dataset prepared!")
 print("X shape:", X.shape)

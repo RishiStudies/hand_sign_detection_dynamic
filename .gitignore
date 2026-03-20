@@ -13,6 +13,7 @@ __pycache__/
 venv/
 env/
 ENV/
+.python-version
 
 # Packaging / build
 build/
@@ -24,6 +25,8 @@ dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.hypothesis/
+.cache/
 .coverage
 .coverage.*
 htmlcov/
@@ -35,16 +38,45 @@ htmlcov/
 .vscode/
 .idea/
 
+# Environment variables
+.env
+.env.local
+.env.*.local
+.env.development.local
+.env.test.local
+.env.production.local
+frontend/.env.local
+frontend/.env
+frontend/.env.*
+
 # Logs
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.pid
+
+# Frontend – Next.js
+node_modules/
+.next/
+out/
+.vercel/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
 
 # Local runtime outputs
 reports/
+*.sqlite3
+tmp/
+temp/
 
 # Model artifacts (generated)
 models/*.pkl
 models/*.h5
 models/*.npy
+models/shared_backend_state.json
 
 # Large/local processed data artifacts
 data/X_data*.npy
@@ -53,3 +85,9 @@ data/wlasl_labels*.npy
 
 # Optional local dataset video dump
 data/videos/
+frontend-react/
+frontend-v2/
+# Keep local-only cleanup targets out of Git (no deletion required)
+reports/exports/
+model_training_legacy_backup.py
+model_training.ipynb

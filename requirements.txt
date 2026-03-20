@@ -8,3 +8,4 @@ scikit-learn
 fastapi
 uvicorn
 tensorflow
+python-multipart
