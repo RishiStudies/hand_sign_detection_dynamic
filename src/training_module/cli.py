@@ -1,7 +1,10 @@
 import argparse
 import json
+import logging
 
 from .service import TrainingService
+
+logger = logging.getLogger("training_cli")
 
 
 def _add_profile_args(parser: argparse.ArgumentParser, default_profile: str = "full") -> None:
@@ -36,91 +39,27 @@ def training_pipeline_main() -> None:
     parser.add_argument("--include-hashes", action="store_true")
 
     args = parser.parse_args()
-    trainer = TrainingService()
-    profile = trainer.get_profile(args.profile)
-    save_model = not args.no_save
+    logger.info(f"training_pipeline_main started: command={args.command}, profile={args.profile}, model={args.model}")
+    
+    try:
+        trainer = TrainingService()
+        profile = trainer.get_profile(args.profile)
+        save_model = not args.no_save
 
-    max_classes = args.max_classes if args.max_classes is not None else int(profile["max_classes"])
-    max_videos = (
-        args.max_videos_per_class
-        if args.max_videos_per_class is not None
-        else int(profile["max_videos_per_class"])
-    )
-    sequence_length = (
-        args.sequence_length if args.sequence_length is not None else int(profile["sequence_length"])
-    )
-    frame_stride = args.frame_stride if args.frame_stride is not None else int(profile["frame_stride"])
-
-    if args.command == "preprocess":
-        trainer.process_wlasl_videos(
-            json_file=args.json_file,
-            video_folder=args.video_folder,
-            save_data=save_model,
-            max_classes=max_classes,
-            max_videos_per_class=max_videos,
-            sequence_length=sequence_length,
-            frame_stride=frame_stride,
+        max_classes = args.max_classes if args.max_classes is not None else int(profile["max_classes"])
+        max_videos = (
+            args.max_videos_per_class
+            if args.max_videos_per_class is not None
+            else int(profile["max_videos_per_class"])
         )
-        print(json.dumps(trainer.last_preprocess_summary, indent=2))
-        return
-
-    if args.command == "train-rf":
-        metrics = trainer.train_random_forest_from_csv(
-            data_path=args.csv_path,
-            save_model=save_model,
-            low_end=args.low_end,
-            profile_name=args.profile,
+        sequence_length = (
+            args.sequence_length if args.sequence_length is not None else int(profile["sequence_length"])
         )
-        print(json.dumps(metrics, indent=2))
-        return
+        frame_stride = args.frame_stride if args.frame_stride is not None else int(profile["frame_stride"])
 
-    if args.command == "evaluate":
-        accuracy = trainer.evaluate_random_forest(data_path=args.csv_path)
-        print(json.dumps({"accuracy": accuracy}, indent=2))
-        return
-
-    if args.command == "package":
-        package_path = trainer.package_artifacts(profile_name=args.profile, note=args.note)
-        print(json.dumps({"package_path": package_path}, indent=2))
-        return
-
-    if args.command == "device-all":
-        result = trainer.run_device_pipeline(
-            profile_name=args.profile,
-            note=args.note,
-            csv_path=args.csv_path,
-            json_file=args.json_file,
-            video_folder=args.video_folder,
-            max_classes=max_classes,
-            max_videos_per_class=max_videos,
-            sequence_length=sequence_length,
-            frame_stride=frame_stride,
-        )
-        print(json.dumps(result, indent=2))
-        return
-
-    if args.command == "export-data":
-        result = trainer.export_training_data(
-            output_dir=args.output_dir,
-            archive_prefix=args.archive_prefix,
-            include_videos=not args.exclude_videos,
-            include_hashes=args.include_hashes,
-        )
-        print(json.dumps(result, indent=2))
-        return
-
-    if args.model in {"random_forest", "all"}:
-        rf_metrics = trainer.train_random_forest_from_csv(
-            data_path=args.csv_path,
-            save_model=save_model,
-            low_end=args.low_end,
-            profile_name=args.profile,
-        )
-        print(json.dumps({"random_forest": rf_metrics}, indent=2))
-
-    if args.model in {"lstm", "all"}:
-        if args.data == "wlasl" or args.model == "all":
-            x_values, y_values = trainer.process_wlasl_videos(
+        if args.command == "preprocess":
+            logger.info("Executing preprocess command...")
+            trainer.process_wlasl_videos(
                 json_file=args.json_file,
                 video_folder=args.video_folder,
                 save_data=save_model,
@@ -129,19 +68,104 @@ def training_pipeline_main() -> None:
                 sequence_length=sequence_length,
                 frame_stride=frame_stride,
             )
-            trainer.train_lstm(
-                x_values=x_values,
-                y_values=y_values,
-                save_model=save_model,
-                low_end=args.low_end or bool(profile.get("lstm_low_end", False)),
-            )
-        else:
-            trainer.train_lstm(
-                save_model=save_model,
-                low_end=args.low_end or bool(profile.get("lstm_low_end", False)),
-            )
+            logger.info("Preprocess command completed")
+            print(json.dumps(trainer.last_preprocess_summary, indent=2))
+            return
 
-        print(json.dumps({"lstm": trainer.last_metrics.get("lstm", {})}, indent=2))
+        if args.command == "train-rf":
+            logger.info("Executing train-rf command...")
+            metrics = trainer.train_random_forest_from_csv(
+                data_path=args.csv_path,
+                save_model=save_model,
+                low_end=args.low_end,
+                profile_name=args.profile,
+            )
+            logger.info("train-rf command completed")
+            print(json.dumps(metrics, indent=2))
+            return
+
+        if args.command == "evaluate":
+            logger.info("Executing evaluate command...")
+            accuracy = trainer.evaluate_random_forest(data_path=args.csv_path)
+            logger.info(f"evaluate command completed: accuracy={accuracy:.4f}")
+            print(json.dumps({"accuracy": accuracy}, indent=2))
+            return
+
+        if args.command == "package":
+            logger.info("Executing package command...")
+            package_path = trainer.package_artifacts(profile_name=args.profile, note=args.note)
+            logger.info(f"package command completed: path={package_path}")
+            print(json.dumps({"package_path": package_path}, indent=2))
+            return
+
+        if args.command == "device-all":
+            logger.info("Executing device-all command...")
+            result = trainer.run_device_pipeline(
+                profile_name=args.profile,
+                note=args.note,
+                csv_path=args.csv_path,
+                json_file=args.json_file,
+                video_folder=args.video_folder,
+                max_classes=max_classes,
+                max_videos_per_class=max_videos,
+                sequence_length=sequence_length,
+                frame_stride=frame_stride,
+            )
+            logger.info("device-all command completed")
+            print(json.dumps(result, indent=2))
+            return
+
+        if args.command == "export-data":
+            logger.info("Executing export-data command...")
+            result = trainer.export_training_data(
+                output_dir=args.output_dir,
+                archive_prefix=args.archive_prefix,
+                include_videos=not args.exclude_videos,
+                include_hashes=args.include_hashes,
+            )
+            logger.info("export-data command completed")
+            print(json.dumps(result, indent=2))
+            return
+
+        if args.model in {"random_forest", "all"}:
+            logger.info("Training RandomForest (legacy)...")
+            rf_metrics = trainer.train_random_forest_from_csv(
+                data_path=args.csv_path,
+                save_model=save_model,
+                low_end=args.low_end,
+                profile_name=args.profile,
+            )
+            logger.info("RandomForest training completed (legacy)")
+            print(json.dumps({"random_forest": rf_metrics}, indent=2))
+
+        if args.model in {"lstm", "all"}:
+            logger.info("Training LSTM (legacy)...")
+            if args.data == "wlasl" or args.model == "all":
+                x_values, y_values = trainer.process_wlasl_videos(
+                    json_file=args.json_file,
+                    video_folder=args.video_folder,
+                    save_data=save_model,
+                    max_classes=max_classes,
+                    max_videos_per_class=max_videos,
+                    sequence_length=sequence_length,
+                    frame_stride=frame_stride,
+                )
+                trainer.train_lstm(
+                    x_values=x_values,
+                    y_values=y_values,
+                    save_model=save_model,
+                    low_end=args.low_end or bool(profile.get("lstm_low_end", False)),
+                )
+            else:
+                trainer.train_lstm(
+                    save_model=save_model,
+                    low_end=args.low_end or bool(profile.get("lstm_low_end", False)),
+                )
+            logger.info("LSTM training completed (legacy)")
+            print(json.dumps({"lstm": trainer.last_metrics.get("lstm", {})}, indent=2))
+    except Exception as e:
+        logger.error(f"training_pipeline_main failed: {e}", exc_info=True)
+        raise
 
 
 def random_forest_main() -> None:
@@ -152,15 +176,21 @@ def random_forest_main() -> None:
     parser.add_argument("--no-save", action="store_true")
     args = parser.parse_args()
 
-    trainer = TrainingService()
-    metrics = trainer.train_random_forest_from_csv(
-        data_path=args.csv_path,
-        save_model=not args.no_save,
-        low_end=args.low_end,
-        profile_name=args.profile,
-        source="random_forest_trainer_wrapper",
-    )
-    print(json.dumps(metrics, indent=2))
+    logger.info(f"random_forest_main started: csv_path={args.csv_path}, profile={args.profile}, low_end={args.low_end}")
+    try:
+        trainer = TrainingService()
+        metrics = trainer.train_random_forest_from_csv(
+            data_path=args.csv_path,
+            save_model=not args.no_save,
+            low_end=args.low_end,
+            profile_name=args.profile,
+            source="random_forest_trainer_wrapper",
+        )
+        logger.info("random_forest_main completed")
+        print(json.dumps(metrics, indent=2))
+    except Exception as e:
+        logger.error(f"random_forest_main failed: {e}", exc_info=True)
+        raise
 
 
 def lstm_main() -> None:
@@ -169,13 +199,19 @@ def lstm_main() -> None:
     parser.add_argument("--no-save", action="store_true")
     args = parser.parse_args()
 
-    trainer = TrainingService()
-    trainer.train_lstm(
-        save_model=not args.no_save,
-        low_end=args.low_end,
-        source="lstm_trainer_wrapper",
-    )
-    print(json.dumps(trainer.last_metrics.get("lstm", {}), indent=2))
+    logger.info(f"lstm_main started: low_end={args.low_end}, save_model={not args.no_save}")
+    try:
+        trainer = TrainingService()
+        trainer.train_lstm(
+            save_model=not args.no_save,
+            low_end=args.low_end,
+            source="lstm_trainer_wrapper",
+        )
+        logger.info("lstm_main completed")
+        print(json.dumps(trainer.last_metrics.get("lstm", {}), indent=2))
+    except Exception as e:
+        logger.error(f"lstm_main failed: {e}", exc_info=True)
+        raise
 
 
 def orchestrator_main() -> None:
@@ -191,16 +227,22 @@ def orchestrator_main() -> None:
     parser.add_argument("--note", default="")
     args = parser.parse_args()
 
-    trainer = TrainingService()
-    result = trainer.run_device_pipeline(
-        profile_name=args.profile,
-        note=args.note,
-        csv_path=args.csv_path,
-        json_file=args.json_file,
-        video_folder=args.video_folder,
-        max_classes=args.max_classes,
-        max_videos_per_class=args.max_videos_per_class,
-        sequence_length=args.sequence_length,
-        frame_stride=args.frame_stride,
-    )
-    print(json.dumps(result, indent=2))
+    logger.info(f"orchestrator_main started: profile={args.profile}, note={args.note}")
+    try:
+        trainer = TrainingService()
+        result = trainer.run_device_pipeline(
+            profile_name=args.profile,
+            note=args.note,
+            csv_path=args.csv_path,
+            json_file=args.json_file,
+            video_folder=args.video_folder,
+            max_classes=args.max_classes,
+            max_videos_per_class=args.max_videos_per_class,
+            sequence_length=args.sequence_length,
+            frame_stride=args.frame_stride,
+        )
+        logger.info("orchestrator_main completed")
+        print(json.dumps(result, indent=2))
+    except Exception as e:
+        logger.error(f"orchestrator_main failed: {e}", exc_info=True)
+        raise

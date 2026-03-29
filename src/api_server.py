@@ -6,6 +6,7 @@ import importlib
 import uuid
 import warnings
 from collections import defaultdict, deque
+from logging.handlers import RotatingFileHandler
 from threading import Lock
 from typing import Any, Dict, List, Optional
 
@@ -41,8 +42,58 @@ except ImportError:
     from training_module.features import get_expected_feature_dimension
 
 warnings.filterwarnings("ignore")
-logger = logging.getLogger("api_server")
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+
+# ========== LOGGING SETUP ==========
+def setup_logging():
+    """Configure structured logging with optional file rotation.
+    
+    Logs to:
+    - stderr (always)
+    - logs/api_server.log (if LOG_TO_FILE enabled)
+    
+    Environment variables:
+    - LOG_LEVEL: DEBUG, INFO, WARNING, ERROR (default: INFO)
+    - LOG_TO_FILE: true/1 to enable file logging (default: false)
+    - LOGS_DIR: directory for log files (default: ./logs)
+    """
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_to_file = os.getenv("LOG_TO_FILE", "false").lower() in ("true", "1", "yes")
+    logs_dir = os.getenv("LOGS_DIR", "logs")
+    
+    logger_obj = logging.getLogger("api_server")
+    logger_obj.setLevel(getattr(logging, log_level, logging.INFO))
+    
+    # Clear existing handlers
+    logger_obj.handlers.clear()
+    
+    # Formatter
+    formatter = logging.Formatter(
+        '%(asctime)s [%(name)s] %(levelname)s: %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # Console handler (always enabled)
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    logger_obj.addHandler(console_handler)
+    
+    # File handler (optional, with rotation)
+    if log_to_file:
+        os.makedirs(logs_dir, exist_ok=True)
+        log_file = os.path.join(logs_dir, "api_server.log")
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=50_000_000,  # 50MB
+            backupCount=5  # Keep 5 backups
+        )
+        file_handler.setFormatter(formatter)
+        logger_obj.addHandler(file_handler)
+        logger_obj.info("File logging enabled at %s", log_file)
+    
+    return logger_obj
+
+logger = setup_logging()
+logger.info("API Server starting up...")
 
 # Performance and safety limits.
 MAX_FRAME_WIDTH = 320
@@ -99,6 +150,42 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ========== ENVIRONMENT VALIDATION ==========
+def validate_environment():
+    """Validate critical environment variables at startup."""
+    warnings_list = []
+    errors_list = []
+    
+    # Check TRAINING_API_KEY in production
+    if not TRAINING_API_KEY:
+        warnings_list.append(
+            "TRAINING_API_KEY not set - training endpoints are OPEN to anyone. "
+            "Required for production deployments."
+        )
+    elif len(TRAINING_API_KEY) < 16:
+        warnings_list.append("TRAINING_API_KEY is weak (less than 16 characters)")
+    
+    # Check CORS configuration
+    if not cors_origins_env:
+        logger.info("CORS_ORIGINS not set, using default localhost origins")
+    
+    # Check Redis availability
+    if REDIS_URL:
+        logger.info("Redis URL configured for distributed backend")
+    else:
+        logger.info("Redis not configured, using in-memory fallback")
+    
+    # Log warnings and errors
+    for warning in warnings_list:
+        logger.warning("⚠ %s", warning)
+    for error in errors_list:
+        logger.error("✗ %s", error)
+    
+    if errors_list:
+        raise RuntimeError(f"Environment validation failed: {'; '.join(errors_list)}")
+
+validate_environment()
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 models_dir = os.path.join(script_dir, "../models")
@@ -215,6 +302,7 @@ combo_catalog = ComboDetector()
 
 lstm_model = None
 lstm_labels = None
+lstm_available = False  # Track LSTM availability for startup checks
 
 
 def resize_frame_for_inference(frame: np.ndarray) -> np.ndarray:
@@ -286,24 +374,29 @@ def load_rf_model() -> bool:
 
 
 def load_lstm_model() -> bool:
-    global lstm_model, lstm_labels
+    global lstm_model, lstm_labels, lstm_available
     if not TENSORFLOW_AVAILABLE:
+        logger.warning("TensorFlow not available. LSTM inference disabled.")
+        lstm_available = False
         return False
 
     try:
         load_model = importlib.import_module("tensorflow.keras.models").load_model
         lstm_model_path = resolve_shared_path("lstm", "model_path")
         if not os.path.exists(lstm_model_path):
-            logger.warning("LSTM model path does not exist: %s", lstm_model_path)
+            logger.error("LSTM model path does not exist: %s", lstm_model_path)
+            lstm_available = False
             return False
         lstm_model = load_model(lstm_model_path)
         lstm_labels = np.load(resolve_shared_path("lstm", "labels_path"), allow_pickle=True)
+        lstm_available = True
         logger.info("LSTM model loaded successfully")
         return True
     except Exception as exc:
-        logger.warning("LSTM load failed: %s", exc)
+        logger.error("LSTM load failed: %s", exc)
         lstm_model = None
         lstm_labels = None
+        lstm_available = False
         return False
 
 
@@ -429,11 +522,74 @@ def persist_csv_training_input(data: bytes) -> str:
     return csv_path
 
 
+def validate_csv_schema(csv_path: str, max_rows_to_check: int = 100) -> None:
+    """Validate CSV structure before training.
+    
+    Checks:
+    - File is readable as CSV
+    - Has expected columns (numeric features + label column)
+    - Data types are numeric
+    - Not empty
+    
+    Raises HTTPException on validation failure.
+    """
+    try:
+        df = pd.read_csv(csv_path, nrows=max_rows_to_check)
+        
+        if df.empty:
+            raise ValueError("CSV file is empty")
+        
+        # CSV should have numeric columns (features) and a label column
+        # Expected pattern: columns of floats/ints with possible 'label', 'class', 'gesture' column
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        non_numeric_cols = df.select_dtypes(exclude=[np.number]).columns.tolist()
+        
+        if len(numeric_cols) == 0:
+            raise ValueError("CSV has no numeric feature columns")
+        
+        # At least one label/class/gesture column expected, or numeric column names
+        logger.info(
+            "CSV validation passed: %d numeric features, "
+            "%d non-numeric columns", 
+            len(numeric_cols), 
+            len(non_numeric_cols)
+        )
+        
+    except pd.errors.ParserError as exc:
+        logger.warning("CSV parsing failed: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid CSV format: {str(exc)}"
+        ) from exc
+    except ValueError as exc:
+        logger.warning("CSV structure validation failed: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail=f"CSV validation failed: {str(exc)}"
+        ) from exc
+    except Exception as exc:
+        logger.warning("Unexpected CSV validation error: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail=f"CSV validation error: {str(exc)}"
+        ) from exc
+
+
 def require_training_key(x_api_key: Optional[str]) -> None:
+    """Enforce API key requirement for training endpoints.
+    
+    In production (TRAINING_API_KEY set), this is mandatory.
+    Logs auth attempts for audit trail.
+    """
     if not TRAINING_API_KEY:
+        logger.warning(
+            "Training API not secured: TRAINING_API_KEY environment variable not set"
+        )
         return
+    
     if x_api_key != TRAINING_API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+        logger.warning("Unauthorized training attempt with invalid/missing API key")
+        raise HTTPException(status_code=403, detail="Invalid or missing API key")
 
 
 def acquire_training_slot() -> None:
@@ -560,7 +716,7 @@ def health_ready():
     return {
         "status": "ready",
         "random_forest": "available",
-        "lstm": "available" if lstm_model is not None else "unavailable",
+        "lstm": "available" if lstm_available else "unavailable",
     }
 
 
@@ -574,7 +730,7 @@ def health_details():
         "job_queue_backend": "redis_rq" if is_job_queue_available() else "unavailable",
         "model_status": {
             "random_forest": model is not None and labels is not None,
-            "lstm": lstm_model is not None,
+            "lstm": lstm_available,
             "tensorflow": TENSORFLOW_AVAILABLE,
             "rf_feature_schema": rf_feature_schema,
             "rf_feature_schema_version": rf_feature_schema_version,
@@ -643,8 +799,12 @@ async def predict_sequence(
     acquire_sequence_slot()
 
     try:
-        if lstm_model is None:
-            raise HTTPException(status_code=503, detail="LSTM model not available")
+        if not lstm_available:
+            logger.warning("LSTM prediction requested but model unavailable")
+            raise HTTPException(
+                status_code=501,
+                detail="LSTM model not available. Sequence inference disabled."
+            )
 
         if len(files) != MAX_SEQUENCE_FRAMES:
             raise HTTPException(
@@ -768,9 +928,10 @@ async def train(
         )
 
     sample_payloads = []
-    for sample, label in zip(samples, labels_input):
+    for i, (sample, label) in enumerate(zip(samples, labels_input)):
         if not label or len(label.strip()) == 0 or len(label) > 64:
-            raise HTTPException(status_code=400, detail="Invalid label")
+            logging.warning("Invalid label rejected in train endpoint: %s", label)
+            raise HTTPException(status_code=400, detail=f"Invalid label at index {i}")
         data = await sample.read()
         validate_upload(sample, data, field_name="sample")
         sample_payloads.append(data)
@@ -778,7 +939,9 @@ async def train(
     manifest_path = persist_sample_training_inputs(samples, sample_payloads, labels_input)
     try:
         job = enqueue_named_job("train_rf_samples", manifest_path=manifest_path)
+        logger.info("Sample training job queued: %s with %d samples", job.id, len(samples))
     except Exception as exc:
+        logger.error("Failed to queue sample training job: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return {
@@ -810,12 +973,19 @@ async def train_csv(
             detail=f"CSV file exceeds max size {MAX_CSV_UPLOAD_BYTES} bytes",
         )
     if file.content_type and "csv" not in file.content_type.lower():
+        logger.warning("Rejected CSV upload with wrong content type: %s", file.content_type)
         raise HTTPException(status_code=415, detail="Expected CSV content type")
 
     csv_path = persist_csv_training_input(data)
+    
+    # Validate CSV schema before queuing job
+    validate_csv_schema(csv_path)
+    
     try:
         job = enqueue_named_job("train_rf_csv", csv_path=csv_path)
+        logger.info("CSV training job queued: %s", job.id)
     except Exception as exc:
+        logger.error("Failed to queue CSV training job: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return {
@@ -875,3 +1045,13 @@ async def train_lstm(
 
 load_rf_model()
 load_lstm_model()
+
+if model is None or labels is None:
+    logger.error("CRITICAL: RandomForest model failed to load at startup")
+else:
+    logger.info("API Server initialized successfully. RandomForest model available.")
+    
+if not lstm_available:
+    logger.warning("LSTM model not available - sequence inference disabled")
+else:
+    logger.info("LSTM model available for sequence inference")

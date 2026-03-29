@@ -1,3 +1,8 @@
+"""DEPRECATED: Thin wrapper for backwards compatibility.
+Use: python -m src.training_module.cli train-rf <args> instead.
+Or directly: from src.training_module.cli import random_forest_main
+"""
+
 try:
     from .training_module.cli import random_forest_main
 except ImportError:
