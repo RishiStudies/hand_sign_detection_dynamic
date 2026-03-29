@@ -57,6 +57,15 @@ yarn-error.log*
 pnpm-debug.log*
 *.pid
 
+# Installers and archives (local downloads/exports)
+*.msi
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+
 # Frontend – Next.js
 node_modules/
 .next/

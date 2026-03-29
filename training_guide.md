@@ -1,10 +1,12 @@
-# Hand Sign Detection Local Training Guide
+# Local Training Guide
 
-This project now includes a device-local training software path focused on low-end hardware.
+This guide covers the device-local training workflow and artifact publishing contract used by the backend.
 
-The local trainer is intentionally separate from the serving backend, but it publishes shared artifacts for the backend to consume.
+## 1. Core Concepts
 
-Shared backend contract:
+The training tool is intentionally decoupled from serving, but it publishes artifacts that the backend consumes.
+
+Shared runtime contract:
 - Active RF model: `models/hand_alphabet_model.pkl`
 - Active RF labels: `models/class_labels.npy`
 - Active sequence data: `data/X_data.npy`, `data/y_data.npy`
@@ -12,9 +14,9 @@ Shared backend contract:
 - Active registry: `models/shared_backend_state.json`
 
 Feature contract:
-- Set `FEATURE_SCHEMA=histogram` for 8-value grayscale histogram features.
-- Set `FEATURE_SCHEMA=mediapipe` for 63-value hand landmark features.
-- Use the same `FEATURE_SCHEMA` value for both training and inference. The backend now validates model/input compatibility explicitly.
+- `FEATURE_SCHEMA=histogram` for 8-dimensional histogram features.
+- `FEATURE_SCHEMA=mediapipe` for 63-dimensional landmark features.
+- Use the same value in both training and inference.
 
 Primary entry point:
 
@@ -22,39 +24,37 @@ Primary entry point:
 python src/training_pipeline.py
 ```
 
-## 1. Install Profiles
+## 2. Install Profiles
 
-Use profile-specific dependencies based on where the training runs.
+Choose dependencies based on your execution target.
 
-### Runtime only (inference server)
+### Runtime only
 
 ```bash
 pip install -r requirements-runtime.txt
 ```
 
-### Device local training (Pi-friendly)
+### Device training (Pi-friendly)
 
 ```bash
 pip install -r requirements-device.txt
 ```
 
-### Full training workstation (includes TensorFlow)
+### Full training (workstation)
 
 ```bash
 pip install -r requirements-training.txt
 ```
 
-## 2. Device-Local Commands
+## 3. Local Training Commands
 
-The local trainer supports command mode and hardware profiles.
-
-### Preprocess WLASL data for local workflows
+### Preprocess WLASL data
 
 ```bash
 python src/training_pipeline.py --command preprocess --profile pi_zero
 ```
 
-### Train Random Forest locally on CSV
+### Train Random Forest from CSV
 
 ```bash
 python src/training_pipeline.py --command train-rf --profile pi_zero
@@ -72,40 +72,43 @@ python src/training_pipeline.py --command evaluate --profile pi_zero
 python src/training_pipeline.py --command package --profile pi_zero --note "local retrain"
 ```
 
-### Extract all training data to one ZIP
+### Export training data bundle
 
 ```bash
 python src/training_pipeline.py --command export-data --profile full --archive-prefix training_data_full
 ```
 
-Optional flags:
-- `--exclude-videos` to skip `data/videos`.
-- `--include-hashes` to include SHA256 checksums in the manifest.
-- `--output-dir reports/exports` to choose export destination.
+Optional export flags:
+- `--exclude-videos`
+- `--include-hashes`
+- `--output-dir reports/exports`
 
-### Run full device local workflow
+### Run end-to-end local workflow
 
 ```bash
 python src/training_pipeline.py --command device-all --profile pi_zero --note "nightly device run"
 ```
 
-## 3. Profile Behavior
+## 4. Hardware Profiles
 
 ### `pi_zero`
-- RF defaults tuned for constrained hardware.
-- WLASL preprocessing uses reduced data limits by default.
-- Designed for reliable on-device retraining and packaging.
+
+- Random Forest defaults tuned for constrained hardware.
+- Lower preprocessing limits by default.
+- Best for frequent on-device retraining.
 
 ### `full`
-- Higher-capacity defaults for workstation-class training.
-- Larger dataset processing limits.
 
-## 4. Useful Overrides
+- Higher-capacity defaults for workstation hardware.
+- Better for broad dataset runs and LSTM-heavy workflows.
 
-You can override profile defaults when needed:
+## 5. Useful Overrides
+
+Example override set:
 
 ```bash
-python src/training_pipeline.py --command preprocess --profile pi_zero --max-classes 12 --max-videos-per-class 4 --sequence-length 24 --frame-stride 2
+python src/training_pipeline.py --command preprocess --profile pi_zero \
+	--max-classes 12 --max-videos-per-class 4 --sequence-length 24 --frame-stride 2
 ```
 
 Additional path overrides:
@@ -113,33 +116,33 @@ Additional path overrides:
 - `--video-folder`
 - `--csv-path`
 
-## 5. Artifacts and Metadata
+## 6. Artifact and Metadata Outputs
 
-Local packaging writes:
-- Packaged copies under `models/packages/`
-- Run metadata JSON under `models/packages/` and `reports/`
-- Shared active registry under `models/shared_backend_state.json`
+Packaging writes:
+- Packaged artifacts under `models/packages/`
+- Run metadata under `models/packages/` and `reports/`
+- Updated active registry at `models/shared_backend_state.json`
 
-These metadata files include:
-- Device profile used
-- Last training metrics
+Metadata includes:
+- Profile used
+- Training metrics
 - Preprocessing summary
-- File list included in package
+- Packaged file manifest
 
-The backend reads active model and dataset paths from the shared registry, so the local trainer can stay a separate tool while still feeding the same backend runtime.
+Because the backend loads from the shared registry, training can remain a separate workflow without changing serving code.
 
-## 6. Notes About LSTM on Device
+## 7. LSTM Guidance on Low-End Devices
 
-For Raspberry Pi Zero 2 W, full LSTM training is not recommended for regular operation due to runtime and thermal constraints.
+For Raspberry Pi Zero 2 W, full LSTM training is generally not practical for regular use due to runtime and thermal limits.
 
 Recommended strategy:
-1. Do RF retraining locally on the device.
-2. Run full LSTM training on a stronger machine.
+1. Retrain RF locally on the device.
+2. Train LSTM on a stronger machine.
 3. Deploy optimized artifacts back to the device.
 
-## 7. Backward Compatibility
+## 8. Legacy Compatibility
 
-Legacy mode still works:
+Legacy command mode remains available:
 
 ```bash
 python src/training_pipeline.py --model all
