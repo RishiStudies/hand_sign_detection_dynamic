@@ -42,16 +42,10 @@ notebooks/*.ipynb
 .vscode/
 .idea/
 
-# Environment variables
+# Environment variables (keep config/.env.example)
 .env
 .env.local
-.env.*.local
-.env.development.local
-.env.test.local
-.env.production.local
-frontend/.env.local
-frontend/.env
-frontend/.env.*
+.env.*
 
 # Logs
 *.log
@@ -70,14 +64,8 @@ pnpm-debug.log*
 *.7z
 *.rar
 
-# Frontend – Next.js
+# Node.js (if any frontend tooling)
 node_modules/
-.next/
-out/
-.vercel/
-frontend/node_modules/
-frontend/.next/
-frontend/out/
 
 # Local runtime outputs
 reports/
@@ -106,10 +94,10 @@ data/videos/
 
 # Keep only README in data folder
 !data/README.md
-frontend-react/
-frontend-v2/
-# Keep local-only cleanup targets out of Git (no deletion required)
-reports/exports/
+# Keep only READMEs in special folders
+!notebooks/README.md
+!config/README.md
+!requirements/README.md
 
 # Legacy files (archived or removed)
 model_training_legacy_backup.py
