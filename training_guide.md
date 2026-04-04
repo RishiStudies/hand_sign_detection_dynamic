@@ -21,7 +21,7 @@ Feature contract:
 Primary entry point:
 
 ```bash
-python src/training_pipeline.py
+python train_model.py
 ```
 
 ## 2. Install Profiles
@@ -46,50 +46,43 @@ pip install -r requirements-device.txt
 pip install -r requirements-training.txt
 ```
 
-## 3. Local Training Commands
-
-### Preprocess WLASL data
+### Using pyproject.toml (editable install)
 
 ```bash
-python src/training_pipeline.py --command preprocess --profile pi_zero
+# Runtime only
+pip install -e .
+
+# With device training deps
+pip install -e ".[device]"
+
+# With full training deps (TensorFlow)
+pip install -e ".[training]"
+
+# Development (includes testing tools)
+pip install -e ".[dev]"
 ```
+
+## 3. Local Training Commands
 
 ### Train Random Forest from CSV
 
 ```bash
-python src/training_pipeline.py --command train-rf --profile pi_zero
+python train_model.py
 ```
 
-### Evaluate active RF model
+### Using the training module directly
 
 ```bash
-python src/training_pipeline.py --command evaluate --profile pi_zero
-```
+# Set PYTHONPATH
+export PYTHONPATH=$PYTHONPATH:$(pwd)/src
 
-### Package artifacts and metadata
-
-```bash
-python src/training_pipeline.py --command package --profile pi_zero --note "local retrain"
-```
-
-### Export training data bundle
-
-```bash
-python src/training_pipeline.py --command export-data --profile full --archive-prefix training_data_full
-```
-
-Optional export flags:
-- `--exclude-videos`
-- `--include-hashes`
-- `--output-dir reports/exports`
-
-### Run end-to-end local workflow
-
-```bash
-python src/training_pipeline.py --command device-all --profile pi_zero --note "nightly device run"
+# Import and use training components
+python -c "from hand_sign_detection.training import rf_trainer; print('Ready')"
 ```
 
 ## 4. Hardware Profiles
+
+Profiles are configured in `src/hand_sign_detection/core/config.py`:
 
 ### `pi_zero`
 
@@ -102,49 +95,36 @@ python src/training_pipeline.py --command device-all --profile pi_zero --note "n
 - Higher-capacity defaults for workstation hardware.
 - Better for broad dataset runs and LSTM-heavy workflows.
 
-## 5. Useful Overrides
+## 5. Artifact and Metadata Outputs
 
-Example override set:
-
-```bash
-python src/training_pipeline.py --command preprocess --profile pi_zero \
-	--max-classes 12 --max-videos-per-class 4 --sequence-length 24 --frame-stride 2
-```
-
-Additional path overrides:
-- `--json-file`
-- `--video-folder`
-- `--csv-path`
-
-## 6. Artifact and Metadata Outputs
-
-Packaging writes:
-- Packaged artifacts under `models/packages/`
-- Run metadata under `models/packages/` and `reports/`
-- Updated active registry at `models/shared_backend_state.json`
+Training writes:
+- Model files under `models/`
+- Run metadata in `models/shared_backend_state.json`
 
 Metadata includes:
 - Profile used
 - Training metrics
 - Preprocessing summary
-- Packaged file manifest
+- File manifest
 
 Because the backend loads from the shared registry, training can remain a separate workflow without changing serving code.
 
-## 7. LSTM Guidance on Low-End Devices
+## 6. LSTM Guidance on Low-End Devices
 
 For Raspberry Pi Zero 2 W, full LSTM training is generally not practical for regular use due to runtime and thermal limits.
 
 Recommended strategy:
 1. Retrain RF locally on the device.
-2. Train LSTM on a stronger machine.
+2. Train LSTM on a stronger machine or cloud (Colab).
 3. Deploy optimized artifacts back to the device.
 
-## 8. Legacy Compatibility
+## 7. Environment Variables
 
-Legacy command mode remains available:
+All training configuration respects environment variables:
 
-```bash
-python src/training_pipeline.py --model all
-python src/training_pipeline.py --model random_forest --low-end
-```
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `FEATURE_SCHEMA` | Feature extraction mode | `histogram` |
+| `LOG_LEVEL` | Logging verbosity | `INFO` |
+
+See `.env.example` for the full list.

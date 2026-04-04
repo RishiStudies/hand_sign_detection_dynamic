@@ -3,6 +3,9 @@
 Thumbs.db
 Desktop.ini
 
+# Archive folder (non-production files)
+.archive/
+
 # Python cache and bytecode
 __pycache__/
 *.py[cod]
@@ -33,6 +36,7 @@ htmlcov/
 
 # Jupyter
 .ipynb_checkpoints/
+notebooks/*.ipynb
 
 # IDE settings
 .vscode/
@@ -98,5 +102,10 @@ frontend-react/
 frontend-v2/
 # Keep local-only cleanup targets out of Git (no deletion required)
 reports/exports/
+
+# Legacy files (archived or removed)
 model_training_legacy_backup.py
 model_training.ipynb
+
+# Benchmark outputs
+benchmark_results.json

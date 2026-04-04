@@ -1,12 +1,65 @@
+# Version control
 .git
 .gitignore
-.venv
+
+# Python environments and cache
+.venv/
+venv/
+env/
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.eggs/
+
+# IDE and editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs and temporary files
 *.log
-frontend/node_modules
-frontend/.next
-node_modules
-.next
+logs/
+tmp/
+temp/
+reports/
+
+# Environment files (secrets)
+.env
+.env.*
+!.env.example
+
+# Testing and coverage
+.coverage
+htmlcov/
+coverage.xml
+
+# Documentation build
+docs/_build/
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+node_modules/
+.next/
+
+# Archive and non-production
+.archive/
+notebooks/
+
+# Large data files (should be mounted as volumes)
+data/videos/
+data/*.npy
+models/*.h5
+models/*.pkl
+models/*.npy
+
+# OS files
+.DS_Store
+Thumbs.db

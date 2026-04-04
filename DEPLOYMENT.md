@@ -36,11 +36,10 @@ This guide covers deploying the Hand Sign Detection API Server to production.
 
 4. **Start the API server:**
    ```bash
-   python -m uvicorn src.api_server:app \
+   PYTHONPATH=src uvicorn hand_sign_detection.api.app:app \
      --host 0.0.0.0 \
      --port 8000 \
-     --workers 4 \
-     --env-file .env
+     --workers 4
    ```
 
 ### Docker Deployment

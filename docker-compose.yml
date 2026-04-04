@@ -1,3 +1,6 @@
+# Docker Compose configuration for Hand Sign Detection
+# Profiles: default (backend only), full (all services), dev (with volumes)
+
 services:
   backend:
     build:
@@ -6,7 +9,8 @@ services:
     environment:
       FRONTEND_URL: http://localhost:3000
       CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
-      LOG_LEVEL: INFO
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      FEATURE_SCHEMA: ${FEATURE_SCHEMA:-histogram}
       MAX_UPLOAD_BYTES: 2097152
       MAX_SEQUENCE_FRAMES: 30
       MAX_CSV_UPLOAD_BYTES: 10485760
@@ -16,18 +20,22 @@ services:
       COMBO_STATE_TTL_SECONDS: 300
       JOB_QUEUE_NAME: training
       JOB_TIMEOUT_SECONDS: 7200
+      TRAINING_API_KEY: ${TRAINING_API_KEY:-}
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
     volumes:
       - ./models:/app/models
       - ./data:/app/data
-      - ./reports:/app/reports
+    depends_on:
+      redis:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live', timeout=3)"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 20s
+    restart: unless-stopped
 
   frontend:
     build:
@@ -36,10 +44,13 @@ services:
       args:
         NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
     ports:
-      - "3000:3000"
+      - "${FRONTEND_PORT:-3000}:3000"
     depends_on:
       backend:
         condition: service_healthy
+    profiles:
+      - full
+    restart: unless-stopped
 
   worker:
     build:
@@ -47,26 +58,33 @@ services:
       dockerfile: Dockerfile.worker
     environment:
       REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      FEATURE_SCHEMA: ${FEATURE_SCHEMA:-histogram}
       JOB_QUEUE_NAME: training
       JOB_TIMEOUT_SECONDS: 7200
-      REDIS_RATE_LIMIT_PREFIX: hsd:ratelimit
-      REDIS_COMBO_PREFIX: hsd:combo
-      COMBO_STATE_TTL_SECONDS: 300
     depends_on:
       redis:
         condition: service_healthy
     volumes:
       - ./models:/app/models
       - ./data:/app/data
-      - ./reports:/app/reports
+    profiles:
+      - full
+      - worker
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 15s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
+volumes:
+  redis_data:

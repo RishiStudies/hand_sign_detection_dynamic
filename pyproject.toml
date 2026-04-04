@@ -23,6 +23,8 @@ dependencies = [
     "rq==1.15.1",
     "pandas==2.0.3",
     "python-multipart==0.0.6",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +50,7 @@ dev = [
     "black==23.12.0",
     "flake8==6.1.0",
     "mypy==1.7.1",
+    "httpx>=0.25.0",
 ]
 
 # Documentation
@@ -62,9 +65,63 @@ Documentation = "https://hand-sign-detection.readthedocs.io"
 Repository = "https://github.com/yourorg/hand-sign-detection.git"
 Issues = "https://github.com/yourorg/hand-sign-detection/issues"
 
-[tool.setuptools]
-packages = ["src"]
+[project.scripts]
+hand-sign-detection = "hand_sign_detection.main:main"
 
+[project.entry-points."hand_sign_detection.trainers"]
+rf = "hand_sign_detection.training.rf_trainer:RandomForestTrainer"
+lstm = "hand_sign_detection.training.lstm_trainer:LstmTrainer"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["hand_sign_detection*"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+# ============================================
+# Ruff - Fast Python linter and formatter
+# Replaces black, isort, flake8 with unified tooling
+# ============================================
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "ARG",    # flake8-unused-arguments
+    "SIM",    # flake8-simplify
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B008",   # do not perform function calls in argument defaults
+    "B905",   # zip without explicit strict
+    "ARG001", # unused function argument (common in FastAPI)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG001", "ARG002", "SIM117"]  # Allow nested with in tests
+"__init__.py" = ["F401"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["hand_sign_detection"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+
+# ============================================
+# Legacy tool configs (kept for compatibility)
+# ============================================
 [tool.black]
 line-length = 100
 target-version = ['py311']
@@ -87,11 +144,12 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short --cov=src --cov-report=term-missing"
+addopts = "-v --tb=short"
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::PendingDeprecationWarning",
 ]
+asyncio_mode = "auto"
 
 [tool.coverage.run]
 source = ["src"]

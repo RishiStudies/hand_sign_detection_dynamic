@@ -1,4 +1,10 @@
+# Training dependencies (includes TensorFlow for LSTM training)
+# Extends runtime dependencies
+# For editable install: pip install -e ".[training]"
+
 -r requirements-runtime.txt
+
+# Training-specific packages
 tqdm==4.67.1
 mediapipe==0.10.21
 tensorflow==2.15.1

@@ -1,0 +1,41 @@
+# PR Checks - Lightweight checks for pull requests
+name: PR Checks
+
+on:
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  pr-checks:
+    name: PR Validation
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-runtime.txt
+          pip install pytest ruff
+      
+      - name: Check formatting
+        run: ruff format --check src/ tests/
+        continue-on-error: true
+      
+      - name: Run quick tests
+        run: |
+          PYTHONPATH=src pytest tests/ -v --tb=short -x
+        env:
+          FEATURE_SCHEMA: histogram
+          LOG_LEVEL: ERROR
+      
+      - name: Check Docker build (backend)
+        run: |
+          docker build -f Dockerfile.backend -t test-backend:pr .
+        continue-on-error: true

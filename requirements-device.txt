@@ -1,3 +1,9 @@
+# Lightweight training dependencies for edge devices (no TensorFlow)
+# Suitable for Raspberry Pi and other resource-constrained devices
+# For editable install: pip install -e ".[device]"
+
 -r requirements-runtime.txt
+
+# Device training packages (no TensorFlow)
 tqdm==4.67.1
 mediapipe==0.10.21
