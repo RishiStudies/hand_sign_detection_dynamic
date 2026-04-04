@@ -33,5 +33,5 @@ echo ""
 echo "⏱️  Wait for 'Uvicorn running on' message before opening the UI..."
 echo ""
 
-# Start the API server
-python -m uvicorn src.api_server:app --host 0.0.0.0 --port 8000 --reload
+# Start the API server (use new module path)
+python -m uvicorn hand_sign_detection.api.app:app --host 0.0.0.0 --port 8000 --reload

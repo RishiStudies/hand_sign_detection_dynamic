@@ -85,19 +85,27 @@ reports/
 tmp/
 temp/
 
-# Model artifacts (generated)
+# Model artifacts (do not commit model binaries)
 models/*.pkl
 models/*.h5
 models/*.npy
-models/shared_backend_state.json
+models/*.pt
+models/*.pth
+models/*.onnx
+models/*.json
 
-# Large/local processed data artifacts
-data/X_data*.npy
-data/y_data*.npy
-data/wlasl_labels*.npy
+# Keep only README in models folder
+!models/README.md
 
-# Optional local dataset video dump
+# Large/local processed data artifacts (do not commit binary data)
+data/*.npy
+data/*.csv
+data/*.json
+data/*.txt
 data/videos/
+
+# Keep only README in data folder
+!data/README.md
 frontend-react/
 frontend-v2/
 # Keep local-only cleanup targets out of Git (no deletion required)
