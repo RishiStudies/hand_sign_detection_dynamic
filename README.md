@@ -1,5 +1,9 @@
 # Hand Sign Detection Dynamic
 
+[![Tests](https://github.com/username/hand_sign_detection_dynamic/actions/workflows/ci.yml/badge.svg)](https://github.com/username/hand_sign_detection_dynamic/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A full-stack hand sign recognition platform with browser-based inference, profile-aware local training, unsupervised learning for gesture discovery, and a shared artifact contract between training and serving.
 
 ## Contents
