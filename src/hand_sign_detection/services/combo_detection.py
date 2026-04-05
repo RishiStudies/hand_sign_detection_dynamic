@@ -186,8 +186,10 @@ class ComboService:
             try:
                 self._add_prediction_redis(redis_client, session_id, prediction)
                 return
-            except Exception as exc:
-                logger.warning("Redis combo write failed: %s", exc)
+            except (ConnectionError, TimeoutError, OSError) as exc:
+                logger.warning("Redis combo write failed (connection): %s", exc)
+            except ValueError as exc:
+                logger.warning("Redis combo write failed (serialization): %s", exc)
 
         self._add_prediction_memory(session_id, prediction)
 
@@ -224,8 +226,8 @@ class ComboService:
             try:
                 redis_client.delete(self._get_redis_key(session_id))
                 return
-            except Exception as exc:
-                logger.warning("Redis combo delete failed: %s", exc)
+            except (ConnectionError, TimeoutError, OSError) as exc:
+                logger.warning("Redis combo delete failed (connection): %s", exc)
 
         session_key = self._get_session_key(session_id)
         with self._lock:
@@ -280,8 +282,10 @@ class ComboService:
             try:
                 serialized = redis_client.lrange(self._get_redis_key(session_id), 0, -1)
                 return [json.loads(item) for item in serialized]
-            except Exception as exc:
-                logger.warning("Redis combo read failed: %s", exc)
+            except (ConnectionError, TimeoutError, OSError) as exc:
+                logger.warning("Redis combo read failed (connection): %s", exc)
+            except (ValueError, json.JSONDecodeError) as exc:
+                logger.warning("Redis combo read failed (parsing): %s", exc)
 
         detector = self._get_detector(session_id)
         return list(detector.prediction_buffer)

@@ -146,8 +146,8 @@ class PredictionService:
         return self._metrics
 
     def _compute_image_hash(self, data: bytes) -> str:
-        """Compute hash for cache key."""
-        return hashlib.md5(data).hexdigest()
+        """Compute hash for cache key using blake2b (faster, non-cryptographic)."""
+        return hashlib.blake2b(data, digest_size=16).hexdigest()
 
     def predict_single(
         self,

@@ -1,11 +1,14 @@
 """WLASL video preprocessing for LSTM training.
 
 Extracts hand landmark sequences from WLASL dataset videos.
+Supports parallel processing for faster feature extraction.
 """
 
 import json
 import logging
 import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import cpu_count
 
 import cv2
 import numpy as np
@@ -43,6 +46,8 @@ class WlaslPreprocessor:
         max_videos_per_class: int = 3,
         sequence_length: int = 30,
         frame_stride: int = 1,
+        parallel: bool = True,
+        n_workers: int | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Process WLASL videos and extract sequences.
 
@@ -54,6 +59,8 @@ class WlaslPreprocessor:
             max_videos_per_class: Maximum videos per class
             sequence_length: Number of frames per sequence
             frame_stride: Frame sampling stride
+            parallel: Use parallel processing (default True)
+            n_workers: Number of worker processes (default: CPU count)
 
         Returns:
             Tuple of (X, y) numpy arrays
@@ -71,11 +78,12 @@ class WlaslPreprocessor:
             video_folder,
         )
         logger.info(
-            "Config: max_classes=%d, max_videos_per_class=%d, seq_len=%d, stride=%d",
+            "Config: max_classes=%d, max_videos_per_class=%d, seq_len=%d, stride=%d, parallel=%s",
             max_classes,
             max_videos_per_class,
             sequence_length,
             frame_stride,
+            parallel,
         )
 
         if not os.path.exists(json_file):
@@ -89,40 +97,32 @@ class WlaslPreprocessor:
             data = json.load(file_obj)
         logger.info("Loaded WLASL JSON with %d classes", len(data))
 
-        x_values = []
-        y_values = []
+        # Collect all video tasks
+        video_tasks = []
         labels = []
-        processed_videos = 0
-        missing_videos = 0
 
         for label_index, item in enumerate(data[:max_classes]):
             gloss = item["gloss"]
             labels.append(gloss)
-            logger.debug(
-                "Processing class %d/%d: %s",
-                label_index + 1,
-                min(max_classes, len(data)),
-                gloss,
-            )
 
             for instance in item["instances"][:max_videos_per_class]:
                 video_id = instance["video_id"]
                 video_path = os.path.join(video_folder, video_id + ".mp4")
 
-                if not os.path.exists(video_path):
-                    missing_videos += 1
-                    continue
+                if os.path.exists(video_path):
+                    video_tasks.append((video_path, label_index, sequence_length, frame_stride))
 
-                sequence = self._extract_sequence(
-                    video_path,
-                    sequence_length,
-                    frame_stride,
-                )
+        logger.info("Found %d videos to process", len(video_tasks))
 
-                if sequence is not None:
-                    x_values.append(sequence)
-                    y_values.append(label_index)
-                    processed_videos += 1
+        # Process videos (parallel or sequential)
+        if parallel and len(video_tasks) > 1:
+            x_values, y_values, processed_videos, missing_videos = self._process_parallel(
+                video_tasks, n_workers
+            )
+        else:
+            x_values, y_values, processed_videos, missing_videos = self._process_sequential(
+                video_tasks
+            )
 
         logger.info(
             "Video processing completed: %d processed, %d missing",
@@ -154,6 +154,85 @@ class WlaslPreprocessor:
         logger.info("WLASL preprocessing completed: %s", self.last_summary)
 
         return x_array, y_array
+
+    def _process_sequential(
+        self,
+        video_tasks: list[tuple[str, int, int, int]],
+    ) -> tuple[list, list, int, int]:
+        """Process videos sequentially.
+
+        Args:
+            video_tasks: List of (video_path, label_index, seq_length, stride) tuples
+
+        Returns:
+            Tuple of (x_values, y_values, processed_count, missing_count)
+        """
+        x_values = []
+        y_values = []
+        processed = 0
+
+        for video_path, label_index, seq_length, stride in video_tasks:
+            sequence = self._extract_sequence(video_path, seq_length, stride)
+            if sequence is not None:
+                x_values.append(sequence)
+                y_values.append(label_index)
+                processed += 1
+
+        return x_values, y_values, processed, len(video_tasks) - processed
+
+    def _process_parallel(
+        self,
+        video_tasks: list[tuple[str, int, int, int]],
+        n_workers: int | None = None,
+    ) -> tuple[list, list, int, int]:
+        """Process videos in parallel using ProcessPoolExecutor.
+
+        Args:
+            video_tasks: List of (video_path, label_index, seq_length, stride) tuples
+            n_workers: Number of worker processes (default: CPU count - 1)
+
+        Returns:
+            Tuple of (x_values, y_values, processed_count, missing_count)
+        """
+        if n_workers is None:
+            n_workers = max(1, cpu_count() - 1)
+
+        logger.info("Processing %d videos with %d workers", len(video_tasks), n_workers)
+
+        x_values = []
+        y_values = []
+        processed = 0
+        failed = 0
+
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            # Submit all tasks
+            future_to_task = {
+                executor.submit(
+                    _extract_sequence_worker,
+                    video_path,
+                    seq_length,
+                    stride
+                ): (video_path, label_index)
+                for video_path, label_index, seq_length, stride in video_tasks
+            }
+
+            # Collect results as they complete
+            for future in as_completed(future_to_task):
+                video_path, label_index = future_to_task[future]
+                try:
+                    sequence = future.result()
+                    if sequence is not None:
+                        x_values.append(sequence)
+                        y_values.append(label_index)
+                        processed += 1
+                    else:
+                        failed += 1
+                except (OSError, cv2.error) as exc:
+                    logger.warning("Video processing failed %s: %s", video_path, exc)
+                    failed += 1
+
+        logger.info("Parallel processing complete: %d processed, %d failed", processed, failed)
+        return x_values, y_values, processed, failed
 
     def _extract_sequence(
         self,
@@ -249,6 +328,55 @@ class WlaslPreprocessor:
         )
 
         logger.info("Shared state updated with WLASL preprocessing metadata")
+
+
+def _extract_sequence_worker(
+    video_path: str,
+    sequence_length: int,
+    frame_stride: int,
+) -> list | None:
+    """Worker function for parallel video processing.
+
+    This is a module-level function for multiprocessing compatibility.
+
+    Args:
+        video_path: Path to video file
+        sequence_length: Target sequence length
+        frame_stride: Frame sampling stride
+
+    Returns:
+        Feature sequence or None if extraction failed
+    """
+    cap = cv2.VideoCapture(video_path)
+    sequence = []
+    frame_index = 0
+
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            frame_index += 1
+            if frame_stride > 1 and frame_index % frame_stride != 0:
+                continue
+
+            features = extract_features_from_frame(frame)
+            sequence.append(features)
+
+            if len(sequence) >= sequence_length:
+                break
+    finally:
+        cap.release()
+
+    if len(sequence) >= sequence_length:
+        sequence = sequence[:sequence_length]
+        # Pad if needed
+        while len(sequence) < sequence_length:
+            sequence.append(np.zeros_like(sequence[0]))
+        return sequence
+
+    return None
 
 
 def process_wlasl_videos(**kwargs) -> tuple[np.ndarray, np.ndarray]:

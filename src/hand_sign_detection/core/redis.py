@@ -70,7 +70,8 @@ def is_redis_available() -> bool:
     try:
         client.ping()
         return True
-    except Exception:
+    except (ConnectionError, TimeoutError, OSError) as exc:
+        logger.debug("Redis health check failed: %s", exc)
         return False
 
 

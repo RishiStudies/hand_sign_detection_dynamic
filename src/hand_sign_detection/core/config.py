@@ -230,8 +230,22 @@ class Settings(BaseSettings):
                 "TRAINING_API_KEY not set - training endpoints are OPEN. "
                 "Required for production deployments."
             )
-        elif len(self.training_api_key) < 16:
-            warnings_list.append("TRAINING_API_KEY is weak (less than 16 characters)")
+        else:
+            key = self.training_api_key
+            if len(key) < 32:
+                warnings_list.append(
+                    "TRAINING_API_KEY is weak (less than 32 characters). "
+                    "Recommended: 32+ alphanumeric characters."
+                )
+            # Check for complexity (letters, numbers, mixed case)
+            has_upper = any(c.isupper() for c in key)
+            has_lower = any(c.islower() for c in key)
+            has_digit = any(c.isdigit() for c in key)
+            if not (has_upper and has_lower and has_digit):
+                warnings_list.append(
+                    "TRAINING_API_KEY lacks complexity. "
+                    "Should contain uppercase, lowercase, and digits."
+                )
 
         # Check Redis
         if not self.redis_url:

@@ -145,11 +145,11 @@ def _validate_csv_schema(csv_path: str, max_rows_to_check: int = 100) -> None:
             status_code=400,
             detail=f"CSV validation failed: {str(exc)}",
         ) from exc
-    except Exception as exc:
-        logger.warning("Unexpected CSV validation error: %s", exc)
+    except OSError as exc:
+        logger.error("CSV file I/O error: %s", exc, exc_info=True)
         raise HTTPException(
-            status_code=400,
-            detail=f"CSV validation error: {str(exc)}",
+            status_code=500,
+            detail=f"CSV file error: {str(exc)}",
         ) from exc
 
 
@@ -197,8 +197,11 @@ def get_training_job(
 
     try:
         job_state = get_job_status(job_id)
-    except Exception as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}") from exc
+    except (ConnectionError, TimeoutError) as exc:
+        logger.error("Job queue connection error: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Job queue unavailable") from exc
 
     # Reload models if training completed
     result = job_state.get("result")
@@ -268,9 +271,12 @@ async def train(
     try:
         job = enqueue_named_job("train_rf_samples", manifest_path=manifest_path)
         logger.info("Sample training job queued: %s with %d samples", job.id, len(samples))
-    except Exception as exc:
-        logger.error("Failed to queue sample training job: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except (ConnectionError, TimeoutError) as exc:
+        logger.error("Job queue connection error: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Job queue unavailable") from exc
+    except ValueError as exc:
+        logger.error("Invalid job parameters: %s", exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return {
         "status": "queued",
@@ -322,9 +328,12 @@ async def train_csv(
     try:
         job = enqueue_named_job("train_rf_csv", csv_path=csv_path)
         logger.info("CSV training job queued: %s", job.id)
-    except Exception as exc:
-        logger.error("Failed to queue CSV training job: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except (ConnectionError, TimeoutError) as exc:
+        logger.error("Job queue connection error: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Job queue unavailable") from exc
+    except ValueError as exc:
+        logger.error("Invalid job parameters: %s", exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return {
         "status": "queued",
@@ -358,8 +367,9 @@ async def process_wlasl(
 
     try:
         job = enqueue_named_job("process_wlasl")
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except (ConnectionError, TimeoutError) as exc:
+        logger.error("Job queue connection error: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Job queue unavailable") from exc
 
     return {
         "status": "queued",
@@ -393,8 +403,9 @@ async def train_lstm(
 
     try:
         job = enqueue_named_job("train_lstm")
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except (ConnectionError, TimeoutError) as exc:
+        logger.error("Job queue connection error: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Job queue unavailable") from exc
 
     return {
         "status": "queued",
