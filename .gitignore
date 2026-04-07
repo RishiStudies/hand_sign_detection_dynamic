@@ -3,6 +3,9 @@
 Thumbs.db
 Desktop.ini
 
+# Archive folder (non-production files)
+.archive/
+
 # Python cache and bytecode
 __pycache__/
 *.py[cod]
@@ -38,16 +41,10 @@ htmlcov/
 .vscode/
 .idea/
 
-# Environment variables
+# Environment variables (keep config/.env.example)
 .env
 .env.local
-.env.*.local
-.env.development.local
-.env.test.local
-.env.production.local
-frontend/.env.local
-frontend/.env
-frontend/.env.*
+.env.*
 
 # Logs
 *.log
@@ -57,14 +54,17 @@ yarn-error.log*
 pnpm-debug.log*
 *.pid
 
-# Frontend – Next.js
+# Installers and archives (local downloads/exports)
+*.msi
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+
+# Node.js (if any frontend tooling)
 node_modules/
-.next/
-out/
-.vercel/
-frontend/node_modules/
-frontend/.next/
-frontend/out/
 
 # Local runtime outputs
 reports/
@@ -72,22 +72,35 @@ reports/
 tmp/
 temp/
 
-# Model artifacts (generated)
+# Model artifacts (do not commit model binaries)
 models/*.pkl
 models/*.h5
 models/*.npy
-models/shared_backend_state.json
+models/*.pt
+models/*.pth
+models/*.onnx
+models/*.json
 
-# Large/local processed data artifacts
-data/X_data*.npy
-data/y_data*.npy
-data/wlasl_labels*.npy
+# Keep only README in models folder
+!models/README.md
 
-# Optional local dataset video dump
+# Large/local processed data artifacts (do not commit binary data)
+data/*.npy
+data/*.csv
+data/*.json
+data/*.txt
 data/videos/
-frontend-react/
-frontend-v2/
-# Keep local-only cleanup targets out of Git (no deletion required)
-reports/exports/
+
+# Keep only README in data folder
+!data/README.md
+# Keep only READMEs in special folders
+!notebooks/README.md
+!config/README.md
+!requirements/README.md
+
+# Legacy files (archived or removed)
 model_training_legacy_backup.py
 model_training.ipynb
+
+# Benchmark outputs
+benchmark_results.json

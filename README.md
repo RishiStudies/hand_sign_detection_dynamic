@@ -1,270 +1,246 @@
-﻿# Hand Sign Detection Dynamic
+# Hand Sign Detection Dynamic
 
-A full-stack hand sign recognition system combining browser-based live inference, profile-aware local training, and a shared feature contract that keeps training and serving cleanly decoupled.
+[![Tests](https://github.com/username/hand_sign_detection_dynamic/actions/workflows/ci.yml/badge.svg)](https://github.com/username/hand_sign_detection_dynamic/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
----
+A full-stack hand sign recognition platform with browser-based inference, profile-aware local training, unsupervised learning for gesture discovery, and a shared artifact contract between training and serving.
 
-## Table of Contents
+## Contents
 
-1. [What It Does](#what-it-does)
-2. [Project Structure](#project-structure)
-3. [Quickstart](#quickstart)
+1. [Overview](#overview)
+2. [Repository Layout](#repository-layout)
+3. [Quick Start](#quick-start)
 4. [Feature Schema Contract](#feature-schema-contract)
-5. [Training](#training)
-6. [API Reference](#api-reference)
-7. [Docker](#docker)
-8. [System Diagrams](#system-diagrams)
-9. [Troubleshooting](#troubleshooting)
-10. [Further Reading](#further-reading)
+5. [Training Options](#training-options)
+6. [Unsupervised Learning](#unsupervised-learning)
+7. [API Endpoints](#api-endpoints)
+8. [Docker](#docker)
+9. [System Diagrams](#system-diagrams)
+10. [Related Docs](#related-docs)
 
----
-
-## What It Does
+## Overview
 
 | Capability | Description |
 |---|---|
-| **Live Inference** | Webcam frames → label + confidence in near real time |
-| **Random Forest (Static)** | Low-latency single-frame predictions from landmark-style features |
-| **LSTM (Dynamic)** | Sequence-aware predictions from rolling 30-frame windows |
-| **Combo Detection** | Recognises gesture phrases from a rolling prediction buffer |
-| **Device Training** | Profile-aware CLI training that runs on Pi Zero or workstation |
-| **API Training** | Browser/API-triggered training queued through Redis + RQ |
-| **Shared Artifact Contract** | One registry file keeps model paths consistent between training and serving |
+| Live Inference | Webcam frames to label and confidence in near real time |
+| Random Forest (Static) | Low-latency single-frame predictions |
+| LSTM (Dynamic) | Sequence predictions from rolling frame windows |
+| MediaPipe Integration | High-fidelity hand landmark detection with confidence scoring |
+| Combo Detection | Phrase-level detection from recent prediction history |
+| Unsupervised Learning | K-Means clustering and autoencoders for gesture discovery |
+| Local Training | Profile-aware CLI for low-end and full hardware |
+| API Training | Redis/RQ-queued training triggered through backend endpoints |
+| Shared Artifact Registry | Stable handoff between training outputs and runtime loading |
 
----
+Core contract:
+- `models/shared_backend_state.json` is the source of truth for active runtime artifacts.
 
-## Project Structure
+## Repository Layout
 
-```
+```text
 hand_sign_detection_dynamic/
-│
-├── src/                            # All backend Python source
-│   ├── api_server.py               # FastAPI app — inference, health, training endpoints
-│   ├── shared_artifacts.py         # Reads/writes models/shared_backend_state.json
-│   ├── job_queue.py                # Redis/RQ job submission helpers
-│   ├── worker.py                   # RQ worker entry point for training jobs
-│   ├── training_pipeline.py        # Device-local CLI trainer (wraps training_module)
-│   ├── wlasl_data_preprocessor.py  # WLASL video → feature sequence preprocessor
-│   │
-│   ├── training_module/            # Canonical training package (used by all entry points)
-│   │   ├── config.py               # Feature schema, device profiles, shared constants
-│   │   ├── features.py             # Shared feature extraction (histogram or mediapipe)
-│   │   ├── service.py              # RF + LSTM training, evaluation, artifact publishing
-│   │   ├── jobs.py                 # RQ job handlers (called by worker.py)
-│   │   ├── cli.py                  # CLI entry used by training_pipeline.py
-│   │   └── __init__.py
-│   │
-│   │   # Legacy wrappers — kept for backward compatibility, thin shells only:
-│   ├── random_forest_trainer.py    # → delegates to training_module
-│   ├── lstm_trainer.py             # → delegates to training_module
-│   └── streamlit_app.py            # Optional Streamlit debug UI
-│
-├── frontend/                       # Next.js 16 + React 19 + TypeScript + Tailwind
-│   └── app/
-│       ├── page.tsx                # Landing page with project overview and Get Started CTA
-│       ├── console/
-│       │   └── page.tsx            # Live detection console (camera + prediction + calibration)
-│       ├── types.ts                # Shared TypeScript types (PredictionResponse, etc.)
-│       ├── layout.tsx
-│       ├── globals.css
-│       ├── hooks/                  # Domain-separated React hooks
-│       │   ├── useCameraCapture.ts # Camera stream, frame capture, calibration images
-│       │   ├── usePredictionLoop.ts# Adaptive prediction loop + backend health ping
-│       │   └── useCalibrationFlow.ts # Calibration session management
-│       └── components/
-│           ├── ControlButton.tsx   # Reusable HUD button
-│           ├── MetricTile.tsx      # Status metric display card
-│           └── GestureTimeline.tsx # Mission-log gesture history
-│
-├── data/                           # Training data (not committed to git)
-│   ├── hand_alphabet_data.csv      # Static gesture CSV (RF training)
-│   ├── WLASL_v0.3.json             # WLASL metadata
-│   ├── videos/                     # WLASL video clips
-│   ├── X_data.npy                  # Preprocessed LSTM feature sequences
-│   ├── y_data.npy                  # Preprocessed LSTM labels
-│   └── wlasl_labels.npy            # Class label array for LSTM
-│
-├── models/                         # Trained artifacts (not committed to git)
-│   ├── shared_backend_state.json   # ← Active artifact registry (training writes, API reads)
-│   ├── gesture_model.h5            # LSTM model
-│   ├── class_labels.npy            # RF class labels
-│   └── wlasl_labels.npy            # LSTM class labels
-│
-├── reports/                        # Evaluation output (confusion matrices, metrics)
-│
-├── .env.example                    # Template for all environment variables
-├── docker-compose.yml              # Backend + frontend + Redis + worker
-├── Dockerfile.backend
-├── Dockerfile.worker
-├── requirements-runtime.txt        # Inference-only dependencies
-├── requirements-training.txt       # Full training dependencies
-├── requirements-device.txt         # Lightweight dependencies for constrained devices
-├── architecture_and_workflows.md   # Deep-dive design notes
-└── training_guide.md               # Local training operations guide
+├── src/hand_sign_detection/         # Core application package
+│   ├── api/                         # FastAPI application
+│   │   ├── app.py                   # Application factory
+│   │   ├── dependencies.py          # Dependency injection
+│   │   └── routes/                  # API route modules
+│   │       ├── health.py            # Health & metrics endpoints
+│   │       ├── predict.py           # Prediction endpoints
+│   │       ├── training.py          # Training endpoints
+│   │       └── combos.py            # Combo detection endpoints
+│   ├── core/                        # Core infrastructure
+│   │   ├── config.py                # Pydantic Settings
+│   │   ├── logging.py               # Logging setup
+│   │   ├── redis.py                 # Redis client factory
+│   │   └── shared_state.py          # Artifact registry
+│   ├── models/                      # Model management
+│   │   ├── manager.py               # Thread-safe ModelManager
+│   │   └── features.py              # Feature extraction & MediaPipe
+│   ├── services/                    # Business logic services
+│   │   ├── prediction.py            # PredictionService with caching
+│   │   ├── combo_detection.py       # Combo detector
+│   │   └── rate_limiting.py         # Rate limiter
+│   └── training/                    # Training components
+│       ├── preprocessor.py          # WLASL preprocessor
+│       ├── rf_trainer.py            # Random Forest trainer
+│       ├── lstm_trainer.py          # LSTM trainer
+│       ├── unsupervised.py          # Clustering & autoencoders
+│       ├── artifact_manager.py      # Model packaging
+│       └── job_queue.py             # Background job handling
+├── data/                            # Training data
+│   ├── videos/                      # WLASL video files
+│   ├── WLASL_v0.3.json              # WLASL metadata
+│   ├── X_data.npy                   # Preprocessed sequences
+│   └── y_data.npy                   # Labels
+├── models/                          # Trained models
+│   ├── gesture_model.h5             # LSTM model
+│   ├── hand_alphabet_model.pkl      # Random Forest model
+│   └── shared_backend_state.json    # Artifact registry
+├── tests/                           # Test suite
+├── docker-compose.yml               # Container orchestration
+├── Dockerfile.backend               # Multi-stage API image
+├── Dockerfile.worker                # Worker image
+├── requirements-runtime.txt         # Runtime dependencies
+├── requirements-training.txt        # Training dependencies
+└── pyproject.toml                   # Package configuration
 ```
 
-> **Key insight:** `models/shared_backend_state.json` is the handoff point between training and serving. Training writes the active artifact paths here; the API reads from it on startup and on each model reload.
+## Quick Start
 
----
-
-## Quickstart
-
-### 1. Python dependencies
+### 1. Install dependencies
 
 ```bash
-# Inference only
+# Runtime only
 pip install -r requirements-runtime.txt
 
-# Full training support
+# Full training (includes TensorFlow)
 pip install -r requirements-training.txt
+
+# MediaPipe for hand landmarks (optional)
+pip install mediapipe
 ```
 
-### 2. Environment
+### 2. Configure environment
 
-Copy `.env.example` to `.env` and configure at minimum:
+Copy `.env.example` to `.env`, then set at least:
 
 ```bash
-FEATURE_SCHEMA=histogram          # or: mediapipe
-TRAINING_API_KEY=your-secret-key  # secures /train and related endpoints
+FEATURE_SCHEMA=histogram        # or 'mediapipe' for hand landmarks
+TRAINING_API_KEY=your-secret-key
 CORS_ORIGINS=http://localhost:3000
+LOG_LEVEL=INFO
 ```
 
-### 3. Start the backend
+### 3. Start backend
 
 ```bash
-python -m uvicorn src.api_server:app --host 127.0.0.1 --port 8000 --reload
+# New modular architecture
+uvicorn hand_sign_detection.api.app:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-### 4. Start the frontend
+### 4. Start frontend (optional)
 
 ```bash
-# Create frontend/.env.local
 echo "NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000" > frontend/.env.local
-
-cd frontend
-npm install
-npm.cmd run dev    # use npm.cmd in PowerShell
+cd frontend && npm install && npm run dev
 ```
 
-### 5. Open the app
+### 5. Open services
 
 | URL | Purpose |
 |---|---|
-| `http://127.0.0.1:3000` | Home page with project overview and Get Started flow |
+| `http://127.0.0.1:3000` | Frontend home |
 | `http://127.0.0.1:3000/console` | Live detection console |
-| `http://127.0.0.1:8000/docs` | Interactive API docs (Swagger) |
-| `http://127.0.0.1:8000/health/details` | Backend readiness + loaded artifacts |
-
-Navigation note:
-- Start at `/` to review scope and system context.
-- Click **Get Started** to open `/console`.
-
----
+| `http://127.0.0.1:8000/docs` | Swagger UI |
+| `http://127.0.0.1:8000/health/details` | Backend readiness |
+| `http://127.0.0.1:8000/health/metrics` | Performance metrics |
 
 ## Feature Schema Contract
 
-Training and inference share one explicit feature contract set by `FEATURE_SCHEMA`:
+Training and serving must use the same `FEATURE_SCHEMA` value.
 
 | Value | Feature Type | Dimension | Notes |
 |---|---|---|---|
-| `histogram` | Grayscale histogram | 8 | Default. Fast, no MediaPipe required |
-| `mediapipe` | Hand landmark coords | 63 | Better accuracy, requires MediaPipe |
+| `histogram` | Grayscale histogram | 8 | Fast default; no MediaPipe dependency |
+| `mediapipe` | Hand landmark coordinates | 63 | Higher fidelity; requires MediaPipe |
 
-**Both training and serving must use the same value.** The backend validates model feature dimensions on load and rejects mismatched inputs at inference time instead of silently padding or truncating.
+MediaPipe features include:
+- Hand detection with confidence scoring
+- Bounding box extraction
+- Left/Right hand classification
+- 21 landmark points (x, y, z) per hand
 
-When no hand is detected in `mediapipe` mode, the extractor returns a zero vector of dimension 63 (not a histogram fallback) so the feature contract stays consistent.
+## Training Options
 
----
-
-## Training
-
-### Option A — Device-local CLI
-
-```bash
-# Full end-to-end run
-python src/training_pipeline.py --command device-all --profile pi_zero --note "local run"
-
-# Individual steps
-python src/training_pipeline.py --command preprocess --profile pi_zero
-python src/training_pipeline.py --command train-rf   --profile pi_zero
-python src/training_pipeline.py --command evaluate   --profile pi_zero
-python src/training_pipeline.py --command package    --profile pi_zero
-python src/training_pipeline.py --command export-data --profile pi_zero
-
-# Full training-data ZIP export (raw + processed + videos)
-python src/training_pipeline.py --command export-data --profile full \
-  --archive-prefix training_data_full --include-hashes
-
-# Override preprocessing limits
-python src/training_pipeline.py --command preprocess --profile pi_zero \
-  --max-classes 12 --max-videos-per-class 4 --sequence-length 24 --frame-stride 2
-```
-
-### Option B — API / browser-triggered (queued via Redis)
-
-Requires `X-API-Key: <TRAINING_API_KEY>` header.
-
-```
-POST /train           Train RF from uploaded image samples
-POST /train_csv       Train RF from uploaded CSV
-POST /process_wlasl   Preprocess WLASL videos
-POST /train_lstm      Train LSTM from preprocessed sequences
-
-GET  /jobs/{job_id}   Check training job status
-```
-
-### Option C — Root orchestrator (legacy)
+### A. Device-local CLI
 
 ```bash
-python model_training_orchestrator.py
+# Using new training module
+python train_model.py
 ```
 
-### Hardware profiles
+### B. API-triggered training (Redis/RQ)
 
-| Profile | Target hardware | Typical use |
-|---|---|---|
-| `pi_zero` | Raspberry Pi Zero 2 W | On-device preprocessing and RF retraining |
-| `full` | Workstation / laptop | Larger runs, LSTM workflows |
+Requires `X-API-Key: <TRAINING_API_KEY>`.
 
----
+```text
+POST /train          # Train RF from samples
+POST /train_csv      # Train RF from CSV
+POST /process_wlasl  # Build LSTM sequences
+POST /train_lstm     # Train LSTM model
+GET  /jobs/{job_id}  # Check job status
+```
 
-## API Reference
+### C. Google Colab Training
+
+For GPU-accelerated training:
+```bash
+# Upload to Google Colab
+lstm_model_training.ipynb
+```
+
+## Unsupervised Learning
+
+Discover gesture patterns in unlabeled data:
+
+```python
+from hand_sign_detection.training import UnsupervisedTrainer
+
+trainer = UnsupervisedTrainer()
+
+# Run K-Means clustering to discover gesture groups
+result = trainer.train_clustering(auto_select_k=True)
+print(f"Found {result.n_clusters} clusters")
+print(f"Silhouette score: {result.silhouette_score}")
+
+# Train autoencoder for feature learning
+ae_result = trainer.train_autoencoder(encoding_dim=16)
+print(f"Reconstruction loss: {ae_result.reconstruction_loss}")
+
+# Full analysis
+results = trainer.analyze_data()
+```
+
+## API Endpoints
 
 | Method | Endpoint | Auth | Purpose |
 |---|---|---|---|
-| `POST` | `/predict` | — | Single-frame RF prediction |
-| `POST` | `/predict_sequence` | — | 30-frame LSTM sequence prediction |
-| `GET` | `/combos` | — | List combo templates |
-| `POST` | `/clear_combos` | — | Reset combo buffer |
-| `GET` | `/artifacts` | — | Active artifact registry |
-| `GET` | `/health/live` | — | Liveness check |
-| `GET` | `/health/ready` | — | Model readiness check |
-| `GET` | `/health/details` | — | Readiness + limits + loaded artifact state |
-| `POST` | `/train` | API key | Train RF from uploaded samples |
-| `POST` | `/train_csv` | API key | Train RF from CSV |
-| `POST` | `/process_wlasl` | API key | WLASL preprocessing |
-| `POST` | `/train_lstm` | API key | LSTM training |
-| `GET` | `/jobs/{job_id}` | — | Training job status |
-
-### Rate limit environment variables
-
-```
-RATE_LIMIT_WINDOW_SECONDS
-MAX_PREDICT_REQUESTS_PER_WINDOW
-MAX_SEQUENCE_REQUESTS_PER_WINDOW
-MAX_TRAIN_REQUESTS_PER_WINDOW
-MAX_CONCURRENT_SEQUENCE_REQUESTS
-```
-
-For multi-instance deployments, set `REDIS_URL` to share rate limits and combo state across replicas.
-
----
+| POST | `/predict` | None | Single-frame RF prediction |
+| POST | `/predict_sequence` | None | Sequence LSTM prediction |
+| GET | `/combos` | None | List combo templates |
+| POST | `/clear_combos` | None | Reset combo state |
+| GET | `/artifacts` | None | Current artifact registry |
+| GET | `/health/live` | None | Liveness check |
+| GET | `/health/ready` | None | Readiness check |
+| GET | `/health/details` | None | Runtime details |
+| GET | `/health/metrics` | None | Performance metrics |
+| POST | `/health/metrics/reset` | None | Reset metrics |
+| POST | `/train` | API key | Train RF from samples |
+| POST | `/train_csv` | API key | Train RF from CSV |
+| GET | `/jobs/{job_id}` | None | Check job status |
 
 ## Docker
 
 ```bash
-# Build and start backend + frontend + Redis + worker
+# Backend + Redis only
 docker compose up --build
+
+# Full stack (frontend + worker)
+docker compose --profile full up --build
+
+# With worker for background training
+docker compose --profile worker up --build
+```
+
+Environment variables:
+```bash
+BACKEND_PORT=8000
+FRONTEND_PORT=3000
+REDIS_PORT=6379
+LOG_LEVEL=INFO
+FEATURE_SCHEMA=histogram
+TRAINING_API_KEY=your-secret-key
 ```
 
 | URL | Service |
@@ -273,32 +249,22 @@ docker compose up --build
 | `http://localhost:8000` | Backend |
 | `http://localhost:8000/health/ready` | Readiness probe |
 
----
-
 ## System Diagrams
 
 ### Architecture overview
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {
-  'background': '#0a0f1f',
-  'primaryColor': '#111827',
-  'primaryTextColor': '#f8fafc',
-  'primaryBorderColor': '#22d3ee',
-  'lineColor': '#38bdf8',
-  'clusterBkg': '#0f172a',
-  'clusterBorder': '#334155'
-}}}%%
 flowchart LR
   subgraph Data
     CSV[CSV Landmark Data]
-    WLASL[WLASL JSON + Videos]
+    WLASL[WLASL JSON and Videos]
   end
 
   subgraph Training
     RFTRAIN[RF Training]
     PREP[Sequence Preprocessing]
     LSTMTRAIN[LSTM Training]
+    CLUSTER[K-Means Clustering]
     PACKAGE[Artifact Packaging]
   end
 
@@ -308,10 +274,12 @@ flowchart LR
     RF[Random Forest Model]
     LSTM[LSTM Model]
     COMBO[Combo Detector]
+    MEDIAPIPE[MediaPipe Hands]
   end
 
   CSV --> RFTRAIN
   WLASL --> PREP --> LSTMTRAIN
+  WLASL --> CLUSTER
   RFTRAIN --> PACKAGE
   LSTMTRAIN --> PACKAGE
   PACKAGE --> STATE[shared_backend_state.json]
@@ -319,101 +287,48 @@ flowchart LR
   API --> RF
   API --> LSTM
   API --> COMBO
+  API --> MEDIAPIPE
   UI --> API
-  API --> UI
-
-  classDef data fill:#0ea5e9,stroke:#0369a1,color:#082f49,stroke-width:2px;
-  classDef train fill:#c084fc,stroke:#7e22ce,color:#3b0764,stroke-width:2px;
-  classDef runtime fill:#34d399,stroke:#059669,color:#052e16,stroke-width:2px;
-  classDef state fill:#f97316,stroke:#c2410c,color:#431407,stroke-width:2px;
-  class CSV,WLASL data;
-  class RFTRAIN,PREP,LSTMTRAIN,PACKAGE train;
-  class UI,API,RF,LSTM,COMBO runtime;
-  class STATE state;
 ```
 
-### Inference request flow
+### Inference flow
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {
-  'background': '#0b1020',
-  'primaryColor': '#0f172a',
-  'primaryTextColor': '#e2e8f0',
-  'lineColor': '#22d3ee',
-  'actorBkg': '#1d4ed8',
-  'actorBorder': '#93c5fd',
-  'actorTextColor': '#eff6ff',
-  'signalColor': '#22d3ee',
-  'signalTextColor': '#e0f2fe',
-  'labelBoxBkgColor': '#111827',
-  'labelBoxBorderColor': '#334155',
-  'labelTextColor': '#f8fafc'
-}}}%%
 sequenceDiagram
   participant User
   participant Frontend
   participant Backend
+  participant MediaPipe
   participant Model
   participant Combo
 
-  User->>Frontend: Start camera and perform sign
-  Frontend->>Backend: POST image(s) to /predict or /predict_sequence
-  Backend->>Model: Run RF or LSTM inference
+  User->>Frontend: Perform sign
+  Frontend->>Backend: POST /predict
+  Backend->>MediaPipe: Extract hand landmarks
+  MediaPipe-->>Backend: landmarks + confidence
+  Backend->>Model: Run inference
   Model-->>Backend: label + probability
   Backend->>Combo: Update rolling buffer
-  Combo-->>Backend: combo hit or miss
-  Backend-->>Frontend: JSON response
-  Frontend-->>User: Render label, confidence, combo status
+  Combo-->>Backend: combo hit/miss
+  Backend-->>Frontend: Response with metrics
+  Frontend-->>User: Render label + confidence
 ```
 
-### Static vs dynamic training pipelines
+## Related Docs
 
-```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {
-  'background': '#090f1a',
-  'primaryColor': '#111827',
-  'primaryTextColor': '#f8fafc',
-  'primaryBorderColor': '#22d3ee',
-  'lineColor': '#38bdf8',
-  'clusterBkg': '#111827',
-  'clusterBorder': '#334155'
-}}}%%
-flowchart LR
-  subgraph Static_Path
-    S1[hand_alphabet_data.csv]
-    S2[Feature Matrix]
-    S3[RandomForest Training]
-    S4[hand_alphabet_model.pkl + class_labels.npy]
-  end
-
-  subgraph Dynamic_Path
-    D1[WLASL_v0.3.json + videos]
-    D2[Frame and Feature Extraction]
-    D3[Sequence Builder]
-    D4[X_data.npy + y_data.npy]
-    D5[LSTM Training]
-    D6[gesture_model.h5 + wlasl_labels.npy]
-  end
-
-  S1 --> S2 --> S3 --> S4
-  D1 --> D2 --> D3 --> D4 --> D5 --> D6
-
-  classDef static fill:#06b6d4,stroke:#0e7490,color:#083344,stroke-width:2px;
-  classDef dynamic fill:#a78bfa,stroke:#7c3aed,color:#2e1065,stroke-width:2px;
-  classDef artifact fill:#f59e0b,stroke:#b45309,color:#451a03,stroke-width:2px;
-  class S1,S2,S3 static;
-  class D1,D2,D3,D5 dynamic;
-  class S4,D4,D6 artifact;
-```
+| Document | Contents |
+|---|---|
+| `architecture_and_workflows.md` | System design, data flows |
+| `training_guide.md` | Local training, device profiles |
+| `DEPLOYMENT.md` | Production deployment guide |
+| `QUICKSTART.md` | Quick setup instructions |
+| `docs/PERFORMANCE.md` | Benchmarking and optimization |
+| `docs/SECRETS.md` | Secrets management guide |
+| `docs/FRONTEND.md` | Frontend setup and development |
 
 ---
 
 ## Troubleshooting
-
-**Frontend does not start in PowerShell**
-```bash
-cmd /c "cd frontend && npm.cmd run dev"
-```
 
 **Backend starts but file uploads fail**
 ```bash
@@ -421,18 +336,13 @@ pip install python-multipart
 ```
 
 **MediaPipe unavailable**
-Use `FEATURE_SCHEMA=histogram` — no MediaPipe required, works on constrained hardware.
+Use `FEATURE_SCHEMA=histogram` — no MediaPipe required.
 
 **TensorFlow GPU warnings on Windows**
-Expected on native Windows. CPU training and inference continue to work normally.
+Expected on native Windows. CPU inference works normally.
 
----
-
-## Further Reading
-
-| Document | Contents |
-|---|---|
-| `architecture_and_workflows.md` | System design, component interactions, data flows |
-| `training_guide.md` | Local training operations, device profiles, packaging |
-| `src/api_server.py` | Full FastAPI implementation with inline comments |
-| `src/training_pipeline.py` | Device trainer CLI implementation |
+**Import errors after refactoring**
+Ensure `PYTHONPATH` includes `src/`:
+```bash
+export PYTHONPATH=$PYTHONPATH:$(pwd)/src
+```
